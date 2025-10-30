@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strictmode"
+version = "0.1.0"
+description = "Backend-only trading discipline engine"
+authors = [{name = "StrictMode"}]
+requires-python = ">=3.11"
+dependencies = [
+    "typer[all]",
+    "pandas",
+    "httpx",
+    "sqlmodel",
+    "apscheduler",
+    "pydantic-settings",
+    "ib-insync",
+]
+
+[project.optional-dependencies]
+development = [
+    "pytest",
+]
+
+[project.scripts]
+strictmode = "strictmode.cli:app"
