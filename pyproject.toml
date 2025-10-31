@@ -16,6 +16,7 @@ dependencies = [
     "apscheduler",
     "pydantic-settings",
     "ib-insync",
+    "pytz",
 ]
 
 [project.optional-dependencies]

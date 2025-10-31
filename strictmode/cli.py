@@ -143,6 +143,7 @@ def buy(
     journal.upsert_position(
         Position(symbol=symbol, qty=qty, avg_price=limit_price or stop_price, opened_at=now, paper=paper)
     )
+    journal.upsert_symbol(symbol)
     journal.upsert_stop(
         Stop(
             symbol=symbol,
@@ -218,6 +219,17 @@ def sell_all(
 
     stop = journal.get_stop(symbol)
     if stop:
+        # 取消IBKR上的实际止损单
+        try:
+            stop_orders = broker.find_stop_orders(symbol)
+            for order_id, _ in stop_orders:
+                if not dry_run:
+                    broker.cancel_order(order_id)
+                    typer.echo(f"Cancelled stop order {order_id} for {symbol}")
+                else:
+                    typer.echo(f"[DRY RUN] Would cancel stop order {order_id} for {symbol}")
+        except Exception as e:
+            typer.echo(f"Warning: Failed to cancel stop orders: {e}", err=True)
         journal.delete_stop(symbol)
 
     sell_request = OrderRequest(

@@ -81,7 +81,46 @@ class IBBroker:
 
     def cancel_order(self, order_id: int) -> None:
         self.connect()
-        self.ib.cancelOrder(self.ib.orders()[order_id])  # type: ignore[index]
+        orders = self.ib.openOrders()  # type: ignore[attr-defined]
+        for trade in orders:
+            if trade.order.orderId == order_id:  # type: ignore[attr-defined]
+                self.ib.cancelOrder(trade.order)  # type: ignore[attr-defined]
+                return
+        raise ValueError(f"Order {order_id} not found")
+
+    def find_stop_orders(self, symbol: str) -> list[tuple[int, float]]:
+        """查找指定symbol的所有止损单，返回(order_id, stop_price)列表"""
+        self.connect()
+        contract = self._contract(symbol)
+        trades = self.ib.openOrders()  # type: ignore[attr-defined]
+        result: list[tuple[int, float]] = []
+        for trade in trades:
+            if (
+                trade.contract.symbol == symbol  # type: ignore[attr-defined]
+                and trade.order.orderType.upper() in ("STP", "STP LMT")  # type: ignore[attr-defined]
+            ):
+                order_id = trade.order.orderId  # type: ignore[attr-defined]
+                stop_price = trade.order.auxPrice or trade.order.lmtPrice  # type: ignore[attr-defined]
+                if stop_price:
+                    result.append((order_id, float(stop_price)))
+        return result
+
+    def modify_order(self, order_id: int, stop_price: float | None = None, limit_price: float | None = None) -> OrderResponse:
+        """修改现有订单的价格"""
+        self.connect()
+        orders = self.ib.openOrders()  # type: ignore[attr-defined]
+        for trade in orders:
+            if trade.order.orderId == order_id:  # type: ignore[attr-defined]
+                order = trade.order
+                if stop_price is not None:
+                    order.auxPrice = stop_price  # type: ignore[attr-defined]
+                if limit_price is not None:
+                    order.lmtPrice = limit_price  # type: ignore[attr-defined]
+                trade = self.ib.placeOrder(trade.contract, order)  # type: ignore[attr-defined]
+                self.ib.sleep(1)
+                status = trade.orderStatus.status  # type: ignore[attr-defined]
+                return OrderResponse(order_id=order_id, status=status, description=str(trade.order))
+        raise ValueError(f"Order {order_id} not found")
 
 
 class DryRunBroker(IBBroker):
@@ -97,3 +136,9 @@ class DryRunBroker(IBBroker):
 
     def cancel_order(self, order_id: int) -> None:  # pragma: no cover - noop
         return None
+
+    def find_stop_orders(self, symbol: str) -> list[tuple[int, float]]:  # type: ignore[override]
+        return []
+
+    def modify_order(self, order_id: int, stop_price: float | None = None, limit_price: float | None = None) -> OrderResponse:  # type: ignore[override]
+        return OrderResponse(order_id=None, status="DRY_RUN", description="Dry run modify order")

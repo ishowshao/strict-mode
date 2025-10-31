@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 
@@ -105,6 +105,27 @@ class Journal:
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS symbols (
+                symbol TEXT PRIMARY KEY
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS price_cache (
+                symbol TEXT,
+                date TEXT,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                adj_close REAL,
+                PRIMARY KEY(symbol, date)
+            )
+            """
+        )
         self.conn.commit()
 
     def get_position(self, symbol: str) -> Position | None:
@@ -193,6 +214,57 @@ class Journal:
             "INSERT INTO audit_log(ts, level, msg, ctx) VALUES (?, ?, ?, ?)",
             (datetime.utcnow().isoformat(), level, message, ctx),
         )
+        self.conn.commit()
+
+    def get_all_positions(self) -> list[Position]:
+        rows = self.conn.execute("SELECT * FROM positions").fetchall()
+        return [
+            Position(
+                symbol=row["symbol"],
+                qty=row["qty"],
+                avg_price=row["avg_price"],
+                opened_at=datetime.fromisoformat(row["opened_at"]),
+                paper=bool(row["paper"]),
+            )
+            for row in rows
+        ]
+
+    def cache_price_data(
+        self, symbol: str, price_date: date, open_price: float, high: float, low: float, close: float, adj_close: float
+    ) -> None:
+        self.conn.execute(
+            """
+            REPLACE INTO price_cache(symbol, date, open, high, low, close, adj_close)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (symbol, price_date.isoformat(), open_price, high, low, close, adj_close),
+        )
+        self.conn.commit()
+
+    def get_cached_price(self, symbol: str, price_date: date) -> dict[str, float] | None:
+        row = self.conn.execute(
+            "SELECT * FROM price_cache WHERE symbol = ? AND date = ?", (symbol, price_date.isoformat())
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "open": row["open"],
+            "high": row["high"],
+            "low": row["low"],
+            "close": row["close"],
+            "adj_close": row["adj_close"],
+        }
+
+    def get_latest_cached_date(self, symbol: str) -> date | None:
+        row = self.conn.execute(
+            "SELECT MAX(date) as latest_date FROM price_cache WHERE symbol = ?", (symbol,)
+        ).fetchone()
+        if row is None or row["latest_date"] is None:
+            return None
+        return date.fromisoformat(row["latest_date"])
+
+    def upsert_symbol(self, symbol: str) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO symbols(symbol) VALUES (?)", (symbol,))
         self.conn.commit()
 
     def close(self) -> None:
