@@ -20,11 +20,23 @@ class AdjustedDailyBar:
     def __getitem__(self, key):
         return self._frame[key]
 
+    def __len__(self) -> int:
+        return len(self._frame)
+
+    def __iter__(self):
+        return iter(self._frame)
+
     def set_symbol(self, symbol: str) -> None:
         self.symbol = symbol
 
     def tail(self, count: int) -> "AdjustedDailyBar":
-        return AdjustedDailyBar(self._frame.tail(count))
+        trimmed = AdjustedDailyBar(self._frame.tail(count))
+        trimmed.symbol = self.symbol
+        return trimmed
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return a copy of the underlying pandas DataFrame for downstream use."""
+        return self._frame.copy()
 
     @property
     def frame(self) -> pd.DataFrame:

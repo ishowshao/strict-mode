@@ -10,6 +10,7 @@ import typer
 
 from .config import AppSettings, settings
 from .datasrc.av import AlphaVantageDataSource
+from .datasrc.base import AdjustedDailyBar
 from .engine.broker_ib import DryRunBroker, IBBroker, OrderRequest
 from .engine.journal import Journal, Order, Position, Stop
 from .engine.notifier import TelegramNotifier
@@ -59,8 +60,14 @@ def _compute_initial_stop(
     return float(latest_stop)
 
 
-def _latest_bars(df: pd.DataFrame, count: int) -> pd.DataFrame:
-    return df.tail(count)
+def _to_dataframe(data: pd.DataFrame | AdjustedDailyBar) -> pd.DataFrame:
+    if isinstance(data, AdjustedDailyBar):
+        return data.to_dataframe()
+    return data
+
+
+def _latest_bars(df: pd.DataFrame | AdjustedDailyBar, count: int) -> pd.DataFrame:
+    return _to_dataframe(df).tail(count)
 
 
 def build_container() -> DependencyContainer:
@@ -79,6 +86,8 @@ def buy(
     rth: bool = typer.Option(True, help="Regular trading hours only"),
     paper: bool = typer.Option(True, help="Use paper trading account"),
     dry_run: bool = typer.Option(False, help="Dry run mode"),
+    sl_type: str = typer.Option("chandelier", "--sl-type", help="Stop-loss method"),
+    currency: str = typer.Option("USD", "--currency", help="Order currency"),
 ) -> None:
     container = build_container()
     journal = container.journal
@@ -89,7 +98,8 @@ def buy(
         raise typer.Exit(code=1)
 
     data_source = container.data_source()
-    df = data_source.get_adjusted_daily(symbol)
+    bars = data_source.get_adjusted_daily(symbol)
+    df = _to_dataframe(bars)
     config = ChandelierConfig(
         atr_period=atr_n or container.settings.strategy.atr_n,
         atr_multiplier=atr_k or container.settings.strategy.atr_k,
@@ -104,10 +114,19 @@ def buy(
     df_for_calc = _latest_bars(df, config.atr_period * 2)
     stop_price = _compute_initial_stop(df_for_calc, config, previous_stop)
 
+    if sl_type.lower() != "chandelier":
+        raise typer.BadParameter("Only chandelier stop-loss is currently supported")
+
+    if mkt and limit is not None:
+        raise typer.BadParameter("Market orders cannot specify a limit price")
+
     order_type = "MKT" if mkt else "LMT"
     limit_price = None if mkt else limit
     if order_type == "LMT" and limit_price is None:
         raise typer.BadParameter("Limit price must be provided for limit orders")
+
+    latest_bar = df.iloc[-1]
+    fill_price = limit_price if limit_price is not None else float(latest_bar["adj_close"])
 
     broker = container.broker(paper=paper, dry_run=dry_run)
 
@@ -119,6 +138,7 @@ def buy(
         limit_price=limit_price,
         tif=tif,
         outside_rth=not rth,
+        currency=currency,
     )
     stop_request = OrderRequest(
         symbol=symbol,
@@ -128,6 +148,7 @@ def buy(
         stop_price=stop_price,
         tif="GTC",
         outside_rth=not rth,
+        currency=currency,
     )
 
     if dry_run:
@@ -141,7 +162,7 @@ def buy(
     now = datetime.utcnow()
 
     journal.upsert_position(
-        Position(symbol=symbol, qty=qty, avg_price=limit_price or stop_price, opened_at=now, paper=paper)
+        Position(symbol=symbol, qty=qty, avg_price=fill_price, opened_at=now, paper=paper)
     )
     journal.upsert_symbol(symbol)
     journal.upsert_stop(
@@ -200,6 +221,7 @@ def sell_all(
     tif: str = typer.Option("DAY", help="Time in force"),
     paper: bool = typer.Option(True, help="Use paper trading"),
     dry_run: bool = typer.Option(False, help="Dry run mode"),
+    currency: str = typer.Option("USD", "--currency", help="Order currency"),
 ) -> None:
     container = build_container()
     journal = container.journal
@@ -212,6 +234,8 @@ def sell_all(
     order_qty = qty or position.qty
     order_type = "MKT" if mkt else "LMT"
     limit_price = None if mkt else limit
+    if mkt and limit is not None:
+        raise typer.BadParameter("Market orders cannot specify a limit price")
     if order_type == "LMT" and limit_price is None:
         raise typer.BadParameter("Limit price must be provided for limit orders")
 
@@ -239,6 +263,7 @@ def sell_all(
         order_type=order_type,
         limit_price=limit_price,
         tif=tif,
+        currency=currency,
     )
 
     if dry_run:

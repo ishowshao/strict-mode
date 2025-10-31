@@ -30,10 +30,22 @@ class StubDataSource:
 class StubBroker:
     def __init__(self) -> None:
         self.orders = []
+        self.modified: list[tuple[int | None, float | None]] = []
+        self.cancelled: list[int] = []
 
     def place_order(self, request):
         self.orders.append(request)
         return OrderResponse(order_id=len(self.orders), status="FILLED", description="stub")
+
+    def find_stop_orders(self, symbol: str):
+        return []
+
+    def cancel_order(self, order_id: int):
+        self.cancelled.append(order_id)
+
+    def modify_order(self, order_id: int, stop_price: float | None = None, limit_price: float | None = None):
+        self.modified.append((order_id, stop_price))
+        return OrderResponse(order_id=order_id, status="UPDATED", description="stub")
 
 
 class StubSettings:

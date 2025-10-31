@@ -21,6 +21,7 @@ class OrderRequest:
     stop_price: float | None = None
     tif: str = "GTC"
     outside_rth: bool = False
+    currency: str = "USD"
 
 
 @dataclass(slots=True)
@@ -54,14 +55,14 @@ class IBBroker:
         if self._ib is not None and self._ib.isConnected():  # type: ignore[attr-defined]
             self._ib.disconnect()
 
-    def _contract(self, symbol: str) -> Contract:
+    def _contract(self, symbol: str, currency: str) -> Contract:
         from ib_insync import Stock
 
-        return Stock(symbol, "SMART", "USD")
+        return Stock(symbol, "SMART", currency)
 
     def place_order(self, request: OrderRequest) -> OrderResponse:
         self.connect()
-        contract = self._contract(request.symbol)
+        contract = self._contract(request.symbol, request.currency)
         from ib_insync import Order
 
         order = Order(
@@ -71,7 +72,7 @@ class IBBroker:
             tif=request.tif,
             lmtPrice=request.limit_price,
             auxPrice=request.stop_price,
-            outsideRth=not request.outside_rth,
+            outsideRth=request.outside_rth,
         )
         trade = self.ib.placeOrder(contract, order)
         self.ib.sleep(1)
@@ -91,7 +92,6 @@ class IBBroker:
     def find_stop_orders(self, symbol: str) -> list[tuple[int, float]]:
         """查找指定symbol的所有止损单，返回(order_id, stop_price)列表"""
         self.connect()
-        contract = self._contract(symbol)
         trades = self.ib.openOrders()  # type: ignore[attr-defined]
         result: list[tuple[int, float]] = []
         for trade in trades:

@@ -26,6 +26,7 @@ development = [
 
 [project.scripts]
 strictmode = "strictmode.cli:app"
+strictmode-service = "strictmode.service:main"
 
 [tool.setuptools]
 packages = ["strictmode"]
