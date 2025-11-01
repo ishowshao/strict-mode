@@ -189,27 +189,36 @@ class YFinanceDataSource(AbstractDataSource):
    hist = ticker.history(start=start_str, end=end_str, auto_adjust=False)
    ```
 
-2. **复权比例计算**：
-   - yfinance 的 `auto_adjust=True` 会自动调整，但只调整 `Close`
-   - 为了保持与现有逻辑一致，使用 `auto_adjust=False` 获取原始数据
-   - 然后手动计算复权比例：`ratio = hist['Adj Close'] / hist['Close']`
-   - 生成 `adj_open/high/low = open/high/low * ratio`
-
-3. **日期索引转换**：
+2. **列名标准化与必需列**：
    ```python
-   hist.index = pd.to_datetime(hist.index).date
-   # 或使用
+   rename_map = {
+       "Open": "open",
+       "High": "high",
+       "Low": "low",
+       "Close": "close",
+       "Adj Close": "adj_close",
+       "Volume": "volume",
+   }
+   hist = hist.rename(columns=rename_map)
+   hist = hist[list(rename_map.values())]
+   ```
+
+3. **复权比例计算**：
+   - 使用 `auto_adjust=False` 获取原始数据后，通过 `adj_close` 计算复权比例
+   - 在计算 `ratio = adj_close / close` 前，将 `close == 0` 的行替换为缺失值，避免除零
+   - 如果计算得到的复权比例全为缺失，直接抛出 `RuntimeError("No usable close prices returned from yfinance")`
+   - 生成 `adj_open/high/low = open/high/low * ratio`，必要时对缺失值进行前向填充或丢弃
+
+4. **日期索引转换**：
+   ```python
+   hist.index = pd.to_datetime(hist.index).normalize()
+   hist.index.name = "date"
    hist.index = hist.index.date
    ```
 
-4. **列名标准化**：
-   ```python
-   hist.columns = hist.columns.str.lower()  # Open -> open
-   ```
-
 5. **构建返回对象**：
-   - 创建包含所有必需列的 DataFrame
-   - 使用 `AdjustedDailyBar` 包装
+   - 检查 DataFrame 是否为空，若无数据则抛出 `RuntimeError("No data returned for symbol")`
+   - 确认所有必需列齐全后，创建 `AdjustedDailyBar`
    - 调用 `set_symbol()` 设置符号
 
 #### 4.2.2 更新工厂方法
@@ -226,16 +235,22 @@ def data_source(self) -> AlphaVantageDataSource:
 
 **新代码**：
 ```python
+from .datasrc.base import AbstractDataSource
+
+
 def data_source(self) -> AbstractDataSource:
-    source = self.settings.data.source.lower()
+    source = (self.settings.data.source or "yfinance").lower()
     if source == "yfinance":
         from .datasrc.yfinance import YFinanceDataSource
+
         return YFinanceDataSource()
-    elif source == "alphavantage":
+    if source == "alphavantage":
         from .datasrc.av import AlphaVantageDataSource
+
+        if not self.settings.data.api_key:
+            raise RuntimeError("Alpha Vantage data source requires an API key")
         return AlphaVantageDataSource(api_key=self.settings.data.api_key)
-    else:
-        raise ValueError(f"Unknown data source: {source}")
+    raise ValueError(f"Unknown data source: {source}")
 ```
 
 #### 4.2.3 更新配置处理
@@ -245,15 +260,15 @@ def data_source(self) -> AbstractDataSource:
 **修改位置**：`DataSettings` 类
 
 **变更**：
-- `api_key` 字段改为可选（yfinance 不需要）
-- `source` 默认值改为 `"yfinance"`
+- `api_key` 字段改为可选（yfinance 不需要），Alpha Vantage 路径由工厂显式校验
+- 默认值改为 `"yfinance"`，确保系统在无额外配置时即使用新数据源
 
 **代码**：
 ```python
 @dataclass
 class DataSettings:
-    api_key: str | None = None  # 仅 Alpha Vantage 需要
-    source: str = "yfinance"    # 默认使用 yfinance
+    api_key: str | None = None  # 仅 Alpha Vantage 需要，启用时需显式配置
+    source: str = "yfinance"  # 默认启用 yfinance，可通过环境变量切换
 ```
 
 #### 4.2.4 更新依赖配置
@@ -272,20 +287,14 @@ dependencies = [
 
 **文件**：`tests/test_datasource.py`
 
-**新增测试类**：
-```python
-class MockYFinance:
-    """Mock yfinance 用于测试"""
-    pass
-
-def test_yfinance_adjusted_fields():
-    """测试 yfinance 数据源的复权字段计算"""
-    pass
-```
+**新增测试**：
+- 使用 `pytest` fixture 构建一个伪造的 yfinance 响应（DataFrame），覆盖 `close == 0`、`start/end` 过滤、空数据场景
+- 验证 `YFinanceDataSource.get_adjusted_daily()` 会抛出 `RuntimeError` 当 DataFrame 为空或复权比例不可用
+- 断言 `adj_open/adj_high/adj_low` 与 `adj_close / close` 的比率一致
 
 **更新现有测试**：
-- 确保测试能同时支持两种数据源
-- 添加数据源切换的集成测试
+- 使用参数化在 `MockAlphaVantage` 与 yfinance mock 之间复用断言
+- 为 `DependencyContainer.data_source()` 添加集成测试，验证根据 `STRICTMODE_DATA_SOURCE` 选择不同实现
 
 ---
 
@@ -319,9 +328,10 @@ def test_yfinance_adjusted_fields():
    - 确保返回格式与 `AlphaVantageDataSource` 一致
 
 2. **处理边界情况**：
-   - 符号不存在时的错误处理
-   - 日期范围超出可用数据时的处理
-   - 网络请求失败时的重试机制（yfinance 内部已处理）
+   - 若返回空 DataFrame 或复权比率全为缺失，抛出 `RuntimeError`，与 Alpha Vantage 行为一致
+   - 对 `close == 0` 或缺失的行进行过滤/填补，保证最终 DataFrame 不含 `inf/NaN`
+   - 日期范围超出可用数据时允许返回子集数据；若最终数据为空仍抛异常并记录警告
+   - 捕获 yfinance 抛出的网络异常并转换为统一的运行时错误，便于日志监控
 
 3. **性能优化**：
    - 考虑添加本地缓存（可选）
@@ -334,18 +344,17 @@ def test_yfinance_adjusted_fields():
    - 添加数据源选择逻辑
 
 2. **更新配置**：
-   - 修改 `DataSettings` 默认值
-   - 更新环境变量文档
+   - 将 `DataSettings` 改为可选 `api_key`，默认直接启用 yfinance
+   - 在文档中说明如需回退到 Alpha Vantage，应显式设置 `STRICTMODE_DATA_SOURCE=alphavantage` 并提供 API Key
 
 3. **单元测试**：
-   - 测试 `YFinanceDataSource` 的各个方法
-   - 测试复权计算逻辑
-   - 测试日期过滤功能
+   - 参数化复用 `MockAlphaVantage` 与 yfinance mock，覆盖 `adj_*` 字段比率校验
+   - 针对空 DataFrame、`close == 0`、`start/end` 过滤分别断言抛出/返回结果
+   - 验证 `AdjustedDailyBar` 保持日期索引与列名一致
 
 4. **集成测试**：
-   - 测试 `buy` 命令使用 yfinance
-   - 测试 `sync-data` 命令使用 yfinance
-   - 测试每日任务使用 yfinance
+   - 使用 `monkeypatch` 替换 `DependencyContainer.data_source`，复用 CLI 测试路径验证 `buy`、`sync-data`
+   - 在每日任务测试中提供 yfinance mock DataFrame，确认止损计算与缓存逻辑正常
 
 ### 5.4 阶段四：部署与验证
 
@@ -357,7 +366,7 @@ def test_yfinance_adjusted_fields():
 2. **环境变量配置**：
    ```bash
    STRICTMODE_DATA_SOURCE=yfinance
-   # STRICTMODE_DATA_API_KEY 不再需要（可选保留用于回滚）
+   # STRICTMODE_DATA_API_KEY 保留供回滚使用
    ```
 
 3. **灰度验证**：
@@ -385,8 +394,8 @@ def test_yfinance_adjusted_fields():
    - 更新导入语句（添加 `AbstractDataSource`）
 
 2. **`strictmode/config.py`**：
-   - 修改 `DataSettings.api_key` 为可选
-   - 修改 `DataSettings.source` 默认值为 `"yfinance"`
+   - 将 `DataSettings.api_key` 调整为可选，并将默认数据源设置为 yfinance
+   - 新增对 `STRICTMODE_DATA_SOURCE` 的说明文档，指引如何回退至 Alpha Vantage
 
 3. **`pyproject.toml`**：
    - 添加 `yfinance>=0.2.0` 依赖
@@ -565,12 +574,24 @@ hist = ticker.history(start="2023-01-01", end="2023-12-31", auto_adjust=False)
 data = yf.download("AAPL", start="2023-01-01", end="2023-12-31", auto_adjust=False)
 
 # 处理数据
-hist.index = pd.to_datetime(hist.index).date
-hist.columns = hist.columns.str.lower()
-ratio = hist['adj close'] / hist['close']
-hist['adj_open'] = hist['open'] * ratio
-hist['adj_high'] = hist['high'] * ratio
-hist['adj_low'] = hist['low'] * ratio
+hist.index = pd.to_datetime(hist.index).normalize()
+rename_map = {
+    "Open": "open",
+    "High": "high",
+    "Low": "low",
+    "Close": "close",
+    "Adj Close": "adj_close",
+    "Volume": "volume",
+}
+hist = hist.rename(columns=rename_map)
+hist = hist[list(rename_map.values())]
+close = hist["close"].replace(0, pd.NA)
+ratio = hist["adj_close"] / close
+hist["adj_open"] = hist["open"] * ratio
+hist["adj_high"] = hist["high"] * ratio
+hist["adj_low"] = hist["low"] * ratio
+hist = hist.dropna(subset=["adj_close"])
+hist.index = hist.index.date
 ```
 
 ### 11.2 环境变量配置示例
@@ -595,4 +616,4 @@ STRICTMODE_DATA_SOURCE=yfinance
 
 **文档版本**：v1.0  
 **创建日期**：2024-12-19  
-**最后更新**：2024-12-19
+**最后更新**：2025-11-01
