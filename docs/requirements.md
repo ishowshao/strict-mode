@@ -96,6 +96,28 @@ strictmode sell-all <SYMBOL>
 
 ---
 
+### 3. 数据缓存与检视
+
+```
+strictmode sync-data <SYMBOL>
+  [--days 30]                   # 最大 90 天
+  [--truncate]                  # 同步前清空该 symbol 的缓存
+
+strictmode show-data <SYMBOL>
+  [--limit 10]
+  [--start YYYY-MM-DD]
+  [--end YYYY-MM-DD]
+  [--ascending]                 # 按时间顺序输出
+```
+
+**行为**：
+
+1. `sync-data` 会调用 Alpha Vantage 拉取最近 `days` 天（上限 90）的复权日线数据，并写入本地 `price_cache` 表（同一天数据会覆盖旧值）。
+2. `show-data` 从 SQLite 中读取缓存记录，根据过滤条件打印 OHLC/adj close，供人工校验数据正确性。
+3. 若需要重置缓存，可加 `--truncate` 先删除后重新写入；日常使用建议保留历史，避免触发 Alpha Vantage 频率限制。
+
+---
+
 ## 服务层（每日任务）
 
 **调度**：使用 `APScheduler` 在**美东收盘后**（例如 16:15 America/New_York）运行：

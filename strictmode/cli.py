@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import pandas as pd
+import pytz
 import typer
 
 from .config import AppSettings, settings
@@ -48,6 +49,12 @@ def _send_notification(container: DependencyContainer, message: str) -> None:
     notifier = container.notifier
     if notifier:
         notifier.send_message(message)
+
+
+def _market_date(settings: AppSettings) -> date:
+    tz = pytz.timezone(settings.tz_market)
+    now = datetime.now(tz)
+    return now.date()
 
 
 def _initial_stop_price(fill_price: float, stop_pct: float) -> float:
@@ -301,6 +308,85 @@ def sell_all(
     )
 
     _send_notification(container, f"Sell {symbol} qty={order_qty} status={sell_response.status}")
+
+
+def _parse_days(days: int) -> int:
+    if days <= 0:
+        raise typer.BadParameter("Days must be a positive integer.")
+    if days > 90:
+        raise typer.BadParameter("Maximum allowed window is 90 days.")
+    return days
+
+
+@app.command("sync-data")
+def sync_data(
+    symbol: str = typer.Argument(..., help="Ticker symbol"),
+    days: int = typer.Option(30, help="Number of recent days to fetch (max 90)"),
+    truncate: bool = typer.Option(False, help="Clear existing cached data for symbol before syncing"),
+) -> None:
+    days = _parse_days(days)
+    container = build_container()
+    journal = container.journal
+
+    if truncate:
+        journal.clear_price_cache(symbol)
+
+    data_source = container.data_source()
+    end_date = _market_date(container.settings)
+    start_date = end_date - timedelta(days=days - 1)
+
+    bars = data_source.get_adjusted_daily(symbol)
+    df = _to_dataframe(bars).copy()
+    df.index = pd.to_datetime(df.index)
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+    df = df.loc[(df.index >= start_ts) & (df.index <= end_ts)]
+    if df.empty:
+        typer.echo(f"No data returned for {symbol} in the last {days} days.")
+        return
+
+    for price_date, row in df.iterrows():
+        journal.cache_price_data(
+            symbol=symbol,
+            price_date=price_date.date() if isinstance(price_date, pd.Timestamp) else price_date,
+            open_price=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            adj_close=float(row["adj_close"]),
+        )
+
+    journal.upsert_symbol(symbol)
+    typer.echo(f"Cached {len(df)} rows for {symbol} into price_cache.")
+
+
+@app.command("show-data")
+def show_data(
+    symbol: str = typer.Argument(..., help="Ticker symbol"),
+    limit: int = typer.Option(10, help="Number of rows to display"),
+    start: Optional[datetime] = typer.Option(None, help="Start date (YYYY-MM-DD)"),
+    end: Optional[datetime] = typer.Option(None, help="End date (YYYY-MM-DD)"),
+    ascending: bool = typer.Option(False, help="Display in chronological order"),
+) -> None:
+    if limit is not None and limit <= 0:
+        raise typer.BadParameter("Limit must be positive.")
+
+    container = build_container()
+    journal = container.journal
+
+    start_date = start.date() if start else None
+    end_date = end.date() if end else None
+
+    rows = journal.list_cached_prices(symbol, limit=limit, start=start_date, end=end_date, ascending=ascending)
+    if not rows:
+        typer.echo(f"No cached data for {symbol}. Run 'strictmode sync-data {symbol}' first.")
+        raise typer.Exit(code=0)
+
+    for row in rows:
+        typer.echo(
+            f"{row['date']} | open={row['open']:.2f} high={row['high']:.2f} "
+            f"low={row['low']:.2f} close={row['close']:.2f} adj_close={row['adj_close']:.2f}"
+        )
 
 
 if __name__ == "__main__":

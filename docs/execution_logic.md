@@ -132,6 +132,29 @@ trailing_stop(df_for_calc, config, previous_stop=stop_price)  # 确保后续通�
 
 ---
 
+### 3. CLI命令：`strictmode sync-data <SYMBOL>`
+
+```
+strictmode sync-data AAPL --days 45 [--truncate]
+```
+
+- 使用 CLI 同一个依赖容器初始化 Alpha Vantage 数据源与 SQLite `Journal`。
+- 计算美股市场当前日期，向前回溯 `days`（最多 90）天的窗口。
+- 调用 `get_adjusted_daily` 获取复权日线，并写入 `price_cache` 表（`REPLACE` 语义，重复日期覆盖）。
+- 可选 `--truncate` 先清空该 symbol 的缓存，便于重建数据。
+
+### 4. CLI命令：`strictmode show-data <SYMBOL>`
+
+```
+strictmode show-data AAPL --limit 5 --ascending
+```
+
+- 通过 `Journal.list_cached_prices` 读取本地缓存，支持 `--limit/--start/--end` 过滤。
+- 输出格式：`YYYY-MM-DD | open=... high=... low=... close=... adj_close=...`
+- 若缓存为空，会提示先运行 `sync-data`。
+
+---
+
 ### 3. 每日任务：自动更新止损（尚未实现）
 
 #### 预期执行流程
@@ -244,7 +267,17 @@ stop_price = _initial_stop_price(fill_price, stop_pct)
 trailing_stop(df_for_calc, config, previous_stop=stop_price)
 ```
 
-### 4. 跟踪止损计算（使用历史数据）
+### 4. 数据同步与检视
+```333:378:strictmode/cli.py
+def sync_data(...):
+    ...
+    journal.cache_price_data(...)
+
+def show_data(...):
+    rows = journal.list_cached_prices(...)
+```
+
+### 5. 跟踪止损计算（使用历史数据）
 ```49:64:strictmode/rules/chandelier.py
 def trailing_stop(
     df: pd.DataFrame, config: ChandelierConfig, previous_stop: float | None = None

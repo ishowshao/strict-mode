@@ -263,8 +263,46 @@ class Journal:
             return None
         return date.fromisoformat(row["latest_date"])
 
+    def list_cached_prices(
+        self,
+        symbol: str,
+        limit: int | None = None,
+        start: date | None = None,
+        end: date | None = None,
+        ascending: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT date, open, high, low, close, adj_close FROM price_cache WHERE symbol = ?"
+        params: list[Any] = [symbol]
+        if start is not None:
+            query += " AND date >= ?"
+            params.append(start.isoformat())
+        if end is not None:
+            query += " AND date <= ?"
+            params.append(end.isoformat())
+        order = "ASC" if ascending else "DESC"
+        query += f" ORDER BY date {order}"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        rows = self.conn.execute(query, params).fetchall()
+        return [
+            {
+                "date": date.fromisoformat(row["date"]),
+                "open": row["open"],
+                "high": row["high"],
+                "low": row["low"],
+                "close": row["close"],
+                "adj_close": row["adj_close"],
+            }
+            for row in rows
+        ]
+
     def upsert_symbol(self, symbol: str) -> None:
         self.conn.execute("INSERT OR IGNORE INTO symbols(symbol) VALUES (?)", (symbol,))
+        self.conn.commit()
+
+    def clear_price_cache(self, symbol: str) -> None:
+        self.conn.execute("DELETE FROM price_cache WHERE symbol = ?", (symbol,))
         self.conn.commit()
 
     def close(self) -> None:
