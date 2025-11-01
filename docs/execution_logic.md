@@ -103,7 +103,10 @@ df = data_source.get_adjusted_daily(symbol)
 ```python
 # 只使用最新的 N*2 条数据（默认44条，用于ATR窗口22）
 df_for_calc = _latest_bars(df, config.atr_period * 2)  # 44条
-stop_price = _compute_initial_stop(df_for_calc, config, previous_stop)
+stop_pct = initial_stop_pct or settings.strategy.initial_stop_pct  # 例如 0.05 -> 跌5%
+fill_price = ...  # 市价单使用最新 adj_close，限价单使用 limit
+stop_price = _initial_stop_price(fill_price, stop_pct)
+trailing_stop(df_for_calc, config, previous_stop=stop_price)  # 确保后续通道止损仓位有足够数据
 ```
 
 **为什么需要 N*2 条数据？**
@@ -236,7 +239,9 @@ def get_adjusted_daily(
 ### 3. 计算初始止损价
 ```104:105:strictmode/cli.py
 df_for_calc = _latest_bars(df, config.atr_period * 2)
-stop_price = _compute_initial_stop(df_for_calc, config, previous_stop)
+stop_pct = cli_argument or settings.strategy.initial_stop_pct
+stop_price = _initial_stop_price(fill_price, stop_pct)
+trailing_stop(df_for_calc, config, previous_stop=stop_price)
 ```
 
 ### 4. 跟踪止损计算（使用历史数据）
@@ -279,4 +284,3 @@ def trailing_stop(
 3. **数据新鲜度检查**：
    - 验证最新数据日期是否匹配目标交易日
    - 如果滞后，拒绝操作并告警
-

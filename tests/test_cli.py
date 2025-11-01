@@ -51,7 +51,11 @@ class StubBroker:
 class StubSettings:
     def __init__(self, db_url: str) -> None:
         self.database_url = db_url
-        self.strategy = type("Strategy", (), {"atr_n": 3, "atr_k": 2.0, "drawdown_pct": None})()
+        self.strategy = type(
+            "Strategy",
+            (),
+            {"atr_n": 3, "atr_k": 2.0, "drawdown_pct": None, "initial_stop_pct": 0.05},
+        )()
         self.data = type("Data", (), {"api_key": "demo"})()
         self.ib = type("IB", (), {"host": "", "port": 0, "client_id": 0})()
         self.telegram = None
@@ -84,8 +88,11 @@ def test_buy_and_sell_cli(monkeypatch, runner, tmp_path):
     result = runner.invoke(cli.app, ["buy", "TEST", "10", "--mkt", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert len(container._broker.orders) == 2
-    assert container.journal.get_position("TEST") is not None
-    assert container.journal.get_stop("TEST") is not None
+    position = container.journal.get_position("TEST")
+    stop_record = container.journal.get_stop("TEST")
+    assert position is not None
+    assert stop_record is not None
+    assert stop_record.stop_price == pytest.approx(position.avg_price * (1 - container.settings.strategy.initial_stop_pct))
 
     result_dup = runner.invoke(cli.app, ["buy", "TEST", "10", "--mkt", "--dry-run"])
     assert result_dup.exit_code != 0

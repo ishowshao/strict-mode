@@ -32,6 +32,7 @@ class StrategySettings:
     auto_liquidate: bool = False
     rth_only: bool = True
     drawdown_pct: float | None = None
+    initial_stop_pct: float = 0.05
 
 
 @dataclass
@@ -86,6 +87,7 @@ def load_settings() -> AppSettings:
         auto_liquidate=_env_bool("AUTO_LIQUIDATE", settings.strategy.auto_liquidate),
         rth_only=_env_bool("RTH_ONLY", settings.strategy.rth_only),
         drawdown_pct=float(drawdown) if drawdown is not None else settings.strategy.drawdown_pct,
+        initial_stop_pct=float(_env("INITIAL_STOP_PCT", str(settings.strategy.initial_stop_pct)) or settings.strategy.initial_stop_pct),
     )
     return settings
 

@@ -72,6 +72,7 @@ def _settings(auto_liquidate: bool = False, drawdown_pct: float | None = None):
             auto_liquidate=auto_liquidate,
             drawdown_pct=drawdown_pct,
             rth_only=True,
+            initial_stop_pct=0.05,
         ),
     )
 

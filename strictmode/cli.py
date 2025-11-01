@@ -14,7 +14,7 @@ from .datasrc.base import AdjustedDailyBar
 from .engine.broker_ib import DryRunBroker, IBBroker, OrderRequest
 from .engine.journal import Journal, Order, Position, Stop
 from .engine.notifier import TelegramNotifier
-from .rules.chandelier import ChandelierConfig, trailing_stop
+from .rules.chandelier import ChandelierConfig, NotEnoughDataError, trailing_stop
 
 app = typer.Typer(help="StrictMode trading discipline CLI")
 
@@ -50,14 +50,10 @@ def _send_notification(container: DependencyContainer, message: str) -> None:
         notifier.send_message(message)
 
 
-def _compute_initial_stop(
-    df: pd.DataFrame,
-    config: ChandelierConfig,
-    previous_stop: float | None = None,
-) -> float:
-    stops = trailing_stop(df, config, previous_stop)
-    latest_stop = stops.dropna().iloc[-1]
-    return float(latest_stop)
+def _initial_stop_price(fill_price: float, stop_pct: float) -> float:
+    if stop_pct <= 0 or stop_pct >= 1:
+        raise ValueError("Initial stop percentage must be between 0 and 1.")
+    return fill_price * (1 - stop_pct)
 
 
 def _to_dataframe(data: pd.DataFrame | AdjustedDailyBar) -> pd.DataFrame:
@@ -83,6 +79,11 @@ def buy(
     tif: str = typer.Option("GTC", help="Time in force"),
     atr_n: int = typer.Option(None, help="ATR window override"),
     atr_k: float = typer.Option(None, help="ATR multiplier override"),
+    initial_stop_pct: float | None = typer.Option(
+        None,
+        "--initial-stop-pct",
+        help="Initial stop-loss percentage (e.g., 0.05 for 5%)",
+    ),
     rth: bool = typer.Option(True, help="Regular trading hours only"),
     paper: bool = typer.Option(True, help="Use paper trading account"),
     dry_run: bool = typer.Option(False, help="Dry run mode"),
@@ -111,9 +112,6 @@ def buy(
     if stop_record:
         previous_stop = stop_record.stop_price
 
-    df_for_calc = _latest_bars(df, config.atr_period * 2)
-    stop_price = _compute_initial_stop(df_for_calc, config, previous_stop)
-
     if sl_type.lower() != "chandelier":
         raise typer.BadParameter("Only chandelier stop-loss is currently supported")
 
@@ -127,6 +125,18 @@ def buy(
 
     latest_bar = df.iloc[-1]
     fill_price = limit_price if limit_price is not None else float(latest_bar["adj_close"])
+
+    stop_pct = initial_stop_pct if initial_stop_pct is not None else container.settings.strategy.initial_stop_pct
+    try:
+        stop_price = _initial_stop_price(fill_price, stop_pct)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    df_for_calc = _latest_bars(df, config.atr_period * 2)
+    try:
+        trailing_stop(df_for_calc, config, previous_stop=stop_price)
+    except NotEnoughDataError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     broker = container.broker(paper=paper, dry_run=dry_run)
 

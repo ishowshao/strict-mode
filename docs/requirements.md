@@ -46,6 +46,7 @@
   * 实际使用的 `stop_today = max(stop_yesterday, chandelier_today)`（只上提，不下放）。
   * 若收盘后 `adjClose_today <= stop_today`，在**次一交易时段**触发卖出（或立即发出强提醒/市价清仓，取决于配置）。
 * 可选：若用户配置了**固定回撤百分比**，可作为备选或兜底：`stop_drawdown = peak_price * (1 - dd%)`，实际止损取两者更高者 `max(chandelier, stop_drawdown)`。
+* **仓位建立时的初始止损**：直接按交易成本下方 `initial_stop_pct`（默认 5%）设定，同步写入数据库，并在次日开始套用上述吊灯跟踪逻辑。
 
 ---
 
@@ -59,6 +60,7 @@ strictmode buy <SYMBOL> <QTY>
   [--tif DAY|GTC]               # 默认 GTC
   [--sl-type chandelier]        # 目前固定为 chandelier
   [--atr-n 22] [--atr-k 3.0]
+  [--initial-stop-pct 0.05]     # 初始止损固定百分比
   [--rth true|false]            # 仅常规交易时段，默认 true
   [--paper true|false]          # 默认 true（强制先走 paper）
   [--currency USD]
@@ -68,7 +70,9 @@ strictmode buy <SYMBOL> <QTY>
 
 1. 连接 IBKR（TWS/IB Gateway，优先 paper）。
 2. 下**开仓单**（限价/市价）。
-3. 根据当前最新 EOD 复权数据计算**初始止损价**（`max(chandelier, drawdown?)`）。
+3. 使用下单价与配置的**固定百分比**计算初始止损价（例如 95%）。
+   * 该初始值立即写入止损单，并作为后续吊灯止损的起点。
+   * 为确保后续跟踪顺利，在入场时仍会验证当日数据足够计算 Chandelier（但初始值本身不取用 Chandelier）。
 4. 同步下达**止损单**（`STP`/`STP LMT`），TIF 采用 `GTC`。
 5. 入库：`positions`, `orders`, `stops`，并发 Telegram 通知。
 6. **幂等**：若发现已有未平仓同符号仓位，拒绝或提示使用 `scale-in`（本期不支持）。
@@ -134,6 +138,7 @@ STRICTMODE_DATA_API_KEY=xxxx
 
 STRICTMODE_ATR_N=22
 STRICTMODE_ATR_K=3.0
+STRICTMODE_INITIAL_STOP_PCT=0.05           # 初始止损按成本下方 5%
 
 STRICTMODE_IB_HOST=127.0.0.1
 STRICTMODE_IB_PORT=7497                     # paper 默认 7497
@@ -202,5 +207,3 @@ pyproject.toml
 * 每日任务能拉到最新 EOD，成功**上提**止损并写入 SQLite，Telegram 能收到摘要。
 * 当价格触发止损阈值时，至少能**发出清仓通知**（`AUTO_LIQUIDATE=false` 情况）。
 * 单元/集成测试通过（含计算与幂等用例），Docker 镜像可启动并在日志中看到定时任务注册。
-
-
