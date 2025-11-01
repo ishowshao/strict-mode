@@ -16,7 +16,7 @@ class TelegramSettings:
 class IBSettings:
     host: str = "127.0.0.1"
     port: int = 7497
-    client_id: int = 101
+    client_id: int = 1
 
 
 @dataclass
@@ -73,7 +73,10 @@ def load_settings() -> AppSettings:
     if telegram_token and telegram_chat:
         settings.telegram = TelegramSettings(bot_token=telegram_token, chat_id=telegram_chat)
 
-    settings.data = DataSettings(api_key=_env("DATA_API_KEY", settings.data.api_key) or settings.data.api_key)
+    settings.data = DataSettings(
+        api_key=_env("DATA_API_KEY", settings.data.api_key) or settings.data.api_key,
+        source=_env("DATA_SOURCE", settings.data.source) or settings.data.source,
+    )
 
     drawdown = _env("DRAWDOWN_PCT")
     settings.strategy = StrategySettings(
