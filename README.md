@@ -47,8 +47,10 @@ pip install -e .[development]
 创建 `.env` 文件（或设置环境变量，程序启动时会自动加载项目根目录的 `.env`）：
 
 ```bash
-# 数据源配置（Alpha Vantage）
-STRICTMODE_DATA_API_KEY=your_alphavantage_api_key
+# 数据源配置（默认使用 yfinance，无需额外变量）
+# 如需切换回 Alpha Vantage，请取消注释下方两行
+# STRICTMODE_DATA_SOURCE=alphavantage
+# STRICTMODE_DATA_API_KEY=your_alphavantage_api_key
 
 # Interactive Brokers 配置
 STRICTMODE_IB_HOST=127.0.0.1
@@ -72,8 +74,9 @@ STRICTMODE_AUTO_LIQUIDATE=false      # 触发止损是否自动清仓
    - 纸面交易：启动 Paper Trading 模式（端口 7497）
    - 实盘交易：启动 Live Trading 模式（端口 7496）
 
-2. **获取 Alpha Vantage API Key**
-   - 访问 [Alpha Vantage](https://www.alphavantage.co/support/#api-key) 申请免费 API Key
+2. **准备数据源**
+   - 默认使用 yfinance，无需注册或提供密钥
+   - 如需切换至 Alpha Vantage，请到 [Alpha Vantage](https://www.alphavantage.co/support/#api-key) 申请 API Key，并在 `.env` 中设置 `STRICTMODE_DATA_SOURCE=alphavantage` 与 `STRICTMODE_DATA_API_KEY`
 
 3. **设置 Telegram Bot（可选）**
    - 创建 Bot：[@BotFather](https://t.me/botfather)
