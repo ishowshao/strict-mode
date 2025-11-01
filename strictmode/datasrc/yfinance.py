@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import yfinance as yf
@@ -33,7 +33,11 @@ class YFinanceDataSource(AbstractDataSource):
             RuntimeError: If no data is returned or no usable close prices
         """
         # 转换日期格式
-        start_str = start.isoformat() if start else None
+        if start:
+            start_str = start.isoformat()
+        else:
+            default_start = date.today() - timedelta(days=120)
+            start_str = default_start.isoformat()
         end_str = end.isoformat() if end else None
 
         try:
@@ -112,4 +116,3 @@ class YFinanceDataSource(AbstractDataSource):
         adj_df = AdjustedDailyBar(hist)
         adj_df.set_symbol(symbol)
         return adj_df
-
