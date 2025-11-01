@@ -3,8 +3,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-try:
+
+def _import_ib_components():  # pragma: no cover - thin wrapper for retry
     from ib_insync import IB, Contract, Order
+
+    return IB, Contract, Order
+
+
+try:
+    IB, Contract, Order = _import_ib_components()
+except RuntimeError as exc:  # pragma: no cover - handle asyncio policy on Py3.14+
+    if "no current event loop" in str(exc).lower():
+        import asyncio
+
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        try:
+            IB, Contract, Order = _import_ib_components()
+        except Exception:  # pragma: no cover - fallback to dummy types
+            IB = None  # type: ignore
+            Contract = object  # type: ignore
+            Order = object  # type: ignore
+    else:  # pragma: no cover - unexpected runtime error
+        raise
 except Exception:  # pragma: no cover - ib_insync may not be installed in tests
     IB = None  # type: ignore
     Contract = object  # type: ignore
