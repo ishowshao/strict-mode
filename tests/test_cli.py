@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from strictmode import cli
+from strictmode.datasrc.base import AdjustedDailyBar
 from strictmode.engine.broker_ib import OrderResponse
 
 
@@ -27,7 +28,10 @@ class StubDataSource:
             "adj_close": [200.5 + i for i in range(len(self.dates))],
             "volume": [1000] * len(self.dates),
         }
-        return pd.DataFrame(data, index=self.dates)
+        df = pd.DataFrame(data, index=self.dates)
+        adj_bar = AdjustedDailyBar(df)
+        adj_bar.set_symbol(symbol)
+        return adj_bar
 
 
 class StubBroker:
@@ -60,7 +64,7 @@ class StubSettings:
             (),
             {"atr_n": 3, "atr_k": 2.0, "drawdown_pct": None, "initial_stop_pct": 0.05},
         )()
-        self.data = type("Data", (), {"api_key": "demo"})()
+        self.data = type("Data", (), {"api_key": None, "source": "yfinance"})()
         self.ib = type("IB", (), {"host": "", "port": 0, "client_id": 0})()
         self.telegram = None
 

@@ -25,8 +25,8 @@ class IBSettings:
 
 @dataclass
 class DataSettings:
-    api_key: str = "demo"
-    source: str = "alphavantage"
+    api_key: str | None = None  # 仅 Alpha Vantage 需要，启用时需显式配置
+    source: str = "yfinance"  # 默认启用 yfinance，可通过环境变量切换
 
 
 @dataclass
@@ -79,7 +79,7 @@ def load_settings() -> AppSettings:
         settings.telegram = TelegramSettings(bot_token=telegram_token, chat_id=telegram_chat)
 
     settings.data = DataSettings(
-        api_key=_env("DATA_API_KEY", settings.data.api_key) or settings.data.api_key,
+        api_key=_env("DATA_API_KEY"),  # 可选，仅 Alpha Vantage 需要
         source=_env("DATA_SOURCE", settings.data.source) or settings.data.source,
     )
 

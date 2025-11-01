@@ -10,8 +10,7 @@ import pytz
 import typer
 
 from .config import AppSettings, settings
-from .datasrc.av import AlphaVantageDataSource
-from .datasrc.base import AdjustedDailyBar
+from .datasrc.base import AbstractDataSource, AdjustedDailyBar
 from .engine.broker_ib import DryRunBroker, IBBroker, OrderRequest
 from .engine.journal import Journal, Order, Position, Stop
 from .engine.notifier import TelegramNotifier
@@ -31,8 +30,19 @@ class DependencyContainer:
                 chat_id=app_settings.telegram.chat_id,
             )
 
-    def data_source(self) -> AlphaVantageDataSource:
-        return AlphaVantageDataSource(api_key=self.settings.data.api_key)
+    def data_source(self) -> AbstractDataSource:
+        source = (self.settings.data.source or "yfinance").lower()
+        if source == "yfinance":
+            from .datasrc.yfinance import YFinanceDataSource
+
+            return YFinanceDataSource()
+        if source == "alphavantage":
+            from .datasrc.av import AlphaVantageDataSource
+
+            if not self.settings.data.api_key:
+                raise RuntimeError("Alpha Vantage data source requires an API key")
+            return AlphaVantageDataSource(api_key=self.settings.data.api_key)
+        raise ValueError(f"Unknown data source: {source}")
 
     def broker(self, paper: bool, dry_run: bool) -> DryRunBroker | IBBroker:
         if dry_run:
