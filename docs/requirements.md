@@ -126,24 +126,24 @@ strictmode sell-all <SYMBOL>
 ## 配置（.env / pydantic-settings）
 
 ```
-TZ_LOCAL=Asia/Singapore
-TZ_MARKET=America/New_York
+STRICTMODE_TZ_LOCAL=Asia/Singapore
+STRICTMODE_TZ_MARKET=America/New_York
 
-DATA_SOURCE=alphavantage         
-DATA_API_KEY=xxxx
+STRICTMODE_DATA_SOURCE=alphavantage         
+STRICTMODE_DATA_API_KEY=xxxx
 
-ATR_N=22
-ATR_K=3.0
+STRICTMODE_ATR_N=22
+STRICTMODE_ATR_K=3.0
 
-IB_HOST=127.0.0.1
-IB_PORT=7497                     # paper 默认 7497
-IB_CLIENT_ID=101
+STRICTMODE_IB_HOST=127.0.0.1
+STRICTMODE_IB_PORT=7497                     # paper 默认 7497
+STRICTMODE_IB_CLIENT_ID=1
 
-TELEGRAM_BOT_TOKEN=xxx
-TELEGRAM_CHAT_ID=123456
+STRICTMODE_TELEGRAM_BOT_TOKEN=xxx
+STRICTMODE_TELEGRAM_CHAT_ID=123456
 
-AUTO_LIQUIDATE=false             # 触发止损是否自动清仓
-RTH_ONLY=true
+STRICTMODE_AUTO_LIQUIDATE=false             # 触发止损是否自动清仓
+STRICTMODE_RTH_ONLY=true
 ```
 
 ---
