@@ -78,6 +78,7 @@ def load_settings() -> AppSettings:
         source=_env("DATA_SOURCE", settings.data.source) or settings.data.source,
     )
 
+    # 注意：_env() 会自动添加 STRICTMODE_ 前缀，所以这里实际查找的是 STRICTMODE_DRAWDOWN_PCT
     drawdown = _env("DRAWDOWN_PCT")
     settings.strategy = StrategySettings(
         atr_n=int(_env("ATR_N", str(settings.strategy.atr_n)) or settings.strategy.atr_n),

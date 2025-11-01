@@ -144,6 +144,7 @@ STRICTMODE_TELEGRAM_CHAT_ID=123456
 
 STRICTMODE_AUTO_LIQUIDATE=false             # 触发止损是否自动清仓
 STRICTMODE_RTH_ONLY=true
+STRICTMODE_DRAWDOWN_PCT=0.10                # 可选：固定回撤百分比（如 0.10 表示 10%），作为止损的兜底选项
 ```
 
 ---
