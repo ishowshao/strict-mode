@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings",
     "ib-insync",
     "pytz",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]

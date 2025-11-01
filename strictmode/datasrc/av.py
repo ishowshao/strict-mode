@@ -24,12 +24,13 @@ class AlphaVantageDataSource(AbstractDataSource):
         return httpx.Client(timeout=30.0)
 
     def _build_params(self, symbol: str) -> dict[str, str]:
-        return {
+        params = {
             "function": "TIME_SERIES_DAILY_ADJUSTED",
             "symbol": symbol,
-            "outputsize": "full",
+            "outputsize": "compact",
             "apikey": self.api_key,
         }
+        return params
 
     def _request(self, symbol: str) -> dict[str, Any]:
         response = self.session.get(self.BASE_URL, params=self._build_params(symbol))

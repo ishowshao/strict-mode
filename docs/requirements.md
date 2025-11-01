@@ -54,6 +54,8 @@
 
 ### 1. 建仓（同时下止损）
 
+> 程序启动时会自动加载项目根目录的 `.env`，也可以直接设置系统环境变量。
+
 ```
 strictmode buy <SYMBOL> <QTY>
   [--limit <price> | --mkt]

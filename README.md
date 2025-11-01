@@ -44,7 +44,7 @@ pip install -e .[development]
 
 ### 配置
 
-创建 `.env` 文件（或设置环境变量）：
+创建 `.env` 文件（或设置环境变量，程序启动时会自动加载项目根目录的 `.env`）：
 
 ```bash
 # 数据源配置（Alpha Vantage）
