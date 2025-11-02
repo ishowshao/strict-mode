@@ -11,18 +11,21 @@ StrictMode 是一个**无界面的命令行工具**，帮助你严格执行股�
 - **Chandelier（吊灯）止损策略**：基于 ATR（平均真实波幅）自动计算和更新止损价
 - **只上提不下放**：止损价只会上移保护利润，不会下调增加风险
 - **每日自动更新**：收盘后自动拉取最新数据，更新止损价并调整订单
+- **多次加仓支持**：同一标的可以多次买入，每次买入都有独立的止损单，但会统一上调到全局 Chandelier 水平
 
 ### 📊 交易执行
 
-- **建仓即设止损**：买入时自动设置初始止损单
+- **建仓即设止损**：买入时自动设置初始止损单（基于固定百分比）
 - **智能清仓**：卖出时自动取消止损单
 - **支持限价/市价订单**：灵活的交易方式
+- **订单管理**：查看、取消、对账订单，支持按标的或订单ID筛选
 
 ### 📈 数据管理
 
 - **复权数据支持**：自动处理复权价格，确保计算准确
 - **本地数据缓存**：减少 API 调用，提高效率
 - **历史数据查看**：方便查看和验证数据
+- **多数据源支持**：默认使用 yfinance（免费），可切换至 Alpha Vantage
 
 ### 🔔 通知提醒
 
@@ -63,9 +66,10 @@ STRICTMODE_TELEGRAM_CHAT_ID=your_chat_id
 
 # 策略参数（可选，有默认值）
 STRICTMODE_ATR_N=22                  # ATR 计算周期
-STRICTMODE_ATR_K=3.0                  # ATR 乘数
+STRICTMODE_ATR_K=3.0                 # ATR 乘数
 STRICTMODE_INITIAL_STOP_PCT=0.05     # 初始止损百分比（5%）
 STRICTMODE_AUTO_LIQUIDATE=false      # 触发止损是否自动清仓
+STRICTMODE_DRAWDOWN_PCT=0.10         # 可选：固定回撤百分比（10%），作为止损的兜底选项
 ```
 
 ### 前置准备
@@ -99,17 +103,26 @@ strictmode buy AAPL 10 --mkt --initial-stop-pct 0.03
 # 自定义 ATR 参数
 strictmode buy AAPL 10 --mkt --atr-n 14 --atr-k 2.5
 
+# 多次加仓同一标的（允许）
+strictmode buy AAPL 10 --mkt --initial-stop-pct 0.05
+strictmode buy AAPL 5 --mkt --initial-stop-pct 0.05  # 第二次买入，会创建新的止损单
+
 # 干跑模式（不实际下单，仅测试）
 strictmode buy AAPL 10 --mkt --dry-run
 ```
 
 **执行流程**：
-1. 检查是否已有持仓（防止重复建仓）
-2. 获取历史价格数据
-3. 计算初始止损价（买入价 × (1 - 止损百分比)）
-4. 验证数据是否足够计算 Chandelier 止损
-5. 下达买入订单和止损单到 IBKR
+1. 获取历史价格数据
+2. 计算初始止损价（买入价 × (1 - 止损百分比)）
+3. 验证数据是否足够计算 Chandelier 止损
+4. 下达买入订单和止损单到 IBKR（使用括号单，父单为买入，子单为止损）
+5. 更新持仓记录（支持多次加仓，自动计算加权平均成本）
 6. 记录到数据库并发送通知
+
+**多次加仓说明**：
+- 每次买入都会创建独立的止损单，初始止损价基于该笔买入价格计算
+- 数据库中的持仓会合并为一条记录（数量累加，成本加权平均）
+- 每日任务会将所有止损单统一上调到 Chandelier 水平（只上提，不下放）
 
 ### 2. 清仓（卖出并取消止损）
 
@@ -129,12 +142,69 @@ strictmode sell-all AAPL --mkt --dry-run
 
 **执行流程**：
 1. 检查持仓是否存在
-2. 取消 IBKR 上的止损单
+2. 取消 IBKR 上的所有止损单（查找该标的的所有 `SM:{symbol}` 标记的止损单）
 3. 下达卖出订单
 4. 删除数据库中的持仓和止损记录
 5. 发送通知
 
-### 3. 数据管理
+### 3. 订单管理
+
+#### 查看订单
+
+```bash
+# 查看所有活跃订单（默认）
+strictmode show-orders
+
+# 查看所有订单（包括已完成和已取消）
+strictmode show-orders --state all
+
+# 查看已完成的订单
+strictmode show-orders --state completed
+
+# 查看已取消的订单
+strictmode show-orders --state cancelled
+
+# 实盘账户
+strictmode show-orders --paper false
+```
+
+#### 取消订单
+
+```bash
+# 取消指定订单ID（可重复使用 --id 指定多个）
+strictmode cancel --id 123 --id 456 --apply
+
+# 取消某标的的所有订单（包括子订单）
+strictmode cancel --symbol AAPL --apply
+
+# 预览取消计划（不实际执行）
+strictmode cancel --symbol AAPL
+
+# 实盘账户
+strictmode cancel --symbol AAPL --apply --paper false
+```
+
+#### 对账止损单
+
+当手动减仓或订单状态不一致时，可以使用 `reconcile-stops` 命令：
+
+```bash
+# 查看止损单数量与持仓的对比（预览）
+strictmode reconcile-stops AAPL
+
+# 自动取消多余的止损单
+strictmode reconcile-stops AAPL --apply
+
+# 实盘账户
+strictmode reconcile-stops AAPL --apply --paper false
+```
+
+该命令会：
+- 对比当前持仓数量与所有止损单的总数量
+- 如果止损单数量 > 持仓数量，自动取消多余的止损单（优先取消止损价较高的）
+- 避免触发止损时超卖的风险
+
+### 4. 数据管理
 
 ```bash
 # 同步最近 30 天的数据（默认）
@@ -156,7 +226,7 @@ strictmode show-data AAPL --limit 20
 strictmode show-data AAPL --start 2024-01-01 --end 2024-01-31 --ascending
 ```
 
-### 4. 每日自动更新止损
+### 5. 每日自动更新止损
 
 启动后台服务，每日收盘后（美东时间 16:15）自动更新所有持仓的止损价：
 
@@ -167,9 +237,15 @@ strictmode-service
 **服务功能**：
 - 自动获取所有持仓的最新收盘数据
 - 计算最新的 Chandelier 止损价
+- 对于每个标的的所有止损单，统一上调到 Chandelier 水平（只上提，不下放）
 - 如果止损价上移，自动修改 IBKR 止损单
 - 如果触发止损，发送通知（或自动清仓）
 - 发送每日摘要报告到 Telegram
+
+**服务日志**：
+- 启动时会显示时区配置
+- 每日更新时会记录每个标的的更新情况
+- 错误和警告会记录到数据库的 `audit_log` 表
 
 ## 🛡️ 安全特性
 
@@ -189,7 +265,12 @@ strictmode-service
 
 - **数据新鲜度检查**：确保使用最新的收盘数据
 - **数据量检查**：确保有足够的历史数据计算 ATR
-- **幂等性保护**：防止重复建仓
+- **价格对齐**：所有价格会自动对齐到最小跳动单位，避免 IBKR 错误 110
+
+### 订单标识
+
+- 所有订单使用 `orderRef` 前缀 `SM:{symbol}` 标记，便于识别和管理
+- 止损单与买入单通过括号单关联，在 TWS 中清晰可见
 
 ## 📊 止损策略说明
 
@@ -204,6 +285,7 @@ strictmode-service
 - **N（ATR 周期）**：默认 22 天，可配置
 - **K（ATR 乘数）**：默认 3.0，可配置
 - **跟踪逻辑**：新止损价 = max(旧止损价, 新计算的吊灯止损价)
+- **只上提不下放**：止损价只会上移保护利润，不会下调增加风险
 
 ### 初始止损
 
@@ -225,15 +307,31 @@ strictmode-service
 
 最终止损价取两者中的较高者，提供双重保护。
 
+### 多次加仓的止损管理
+
+- **逐笔兜底**：每次买入都有独立的止损单，初始止损价 = 买入价 × (1 - 初始止损百分比)
+- **全局统一**：每日任务会将所有止损单上调到 Chandelier 水平（只上提，不下放）
+- **触发逻辑**：当价格触发任何一张止损单时，该止损单会被执行，但其他止损单保持不变
+
+**示例**：
+- 第 1 笔：100 买，兜底 5% → `STOP1 = 95.00`
+- 第 2 笔：110 买，兜底 5% → `STOP2 = 104.50`
+- 当日 Chandelier = 98：
+  - `STOP1 = max(95.00, 98.00) = 98.00`
+  - `STOP2 = max(104.50, 98.00) = 104.50`
+- 随后 Chandelier = 107：
+  - `STOP1 = max(98.00, 107.00) = 107.00`
+  - `STOP2 = max(104.50, 107.00) = 107.00`
+
 ## 📁 数据存储
 
 所有数据存储在 SQLite 数据库中（默认：`strictmode.db`），包括：
 
-- **positions**：持仓信息
-- **stops**：止损配置和当前价格
-- **orders**：订单历史
-- **price_cache**：缓存的日线数据
-- **audit_log**：操作日志
+- **positions**：持仓信息（symbol, qty, avg_price, opened_at, paper）
+- **stops**：止损配置和当前价格（symbol, stop_price, method, atr_n, atr_k, updated_at）
+- **orders**：订单历史（id, symbol, side, qty, type, limit_price, stop_price, tif, status, placed_at）
+- **price_cache**：缓存的日线数据（symbol, date, open, high, low, close, adj_close）
+- **audit_log**：操作日志（id, ts, level, msg, ctx）
 
 可通过 `STRICTMODE_DATABASE_URL` 环境变量自定义数据库路径。
 
@@ -260,19 +358,32 @@ STRICTMODE_AUTO_LIQUIDATE=true          # 触发止损时自动清仓（仅实�
 
 **注意**：自动清仓功能仅对实盘账户生效，纸面账户不会自动清仓。
 
+### IBKR 调试
+
+在买入命令中添加 `--ib-debug` 参数可以打印 IB API 的调试事件：
+
+```bash
+strictmode buy AAPL 10 --mkt --ib-debug
+```
+
 ## 📝 常见问题
 
 ### Q: 如何确认配置是否正确？
 
 A: 使用 `--dry-run` 参数测试命令，检查输出和数据库记录。
 
+```bash
+strictmode buy AAPL 10 --mkt --dry-run
+strictmode show-data AAPL
+```
+
 ### Q: 止损单没有更新怎么办？
 
 A: 检查：
 1. IBKR TWS/Gateway 是否正常运行
-2. 每日任务是否正常运行
-3. 数据是否最新（查看日志）
-4. 止损价是否实际上移（查看数据库）
+2. 每日任务是否正常运行（`strictmode-service`）
+3. 数据是否最新（查看日志或使用 `show-data`）
+4. 止损价是否实际上移（查看数据库 `stops` 表）
 
 ### Q: 如何处理 API 调用限制？
 
@@ -281,12 +392,49 @@ A:
 - 每日任务会自动缓存最新数据
 - 避免频繁调用 `buy` 命令（每次都会拉取全部历史数据）
 
+### Q: 多次加仓后如何查看止损单？
+
+A: 使用 `show-orders` 命令查看所有活跃订单：
+
+```bash
+strictmode show-orders
+```
+
+每条止损单都会显示订单ID、父订单ID、止损价等信息。
+
+### Q: 手动减仓后止损单数量不匹配怎么办？
+
+A: 使用 `reconcile-stops` 命令对账：
+
+```bash
+strictmode reconcile-stops AAPL --apply
+```
+
 ### Q: 如何查看操作日志？
 
 A: 数据库中的 `audit_log` 表记录了所有操作。可以使用 SQLite 客户端查看：
 
 ```bash
 sqlite3 strictmode.db "SELECT * FROM audit_log ORDER BY ts DESC LIMIT 20;"
+```
+
+### Q: 为什么买入时会出现错误 110？
+
+A: 错误 110 表示价格不符合最小跳动单位。StrictMode 会自动对齐价格，但如果仍然出现，请检查：
+1. 合约是否正确资格化（系统会自动处理）
+2. 市场规则是否可用（系统会使用兜底值 0.01）
+
+### Q: 如何切换数据源？
+
+A: 在 `.env` 文件中设置：
+
+```bash
+# 使用 yfinance（默认，免费）
+STRICTMODE_DATA_SOURCE=yfinance
+
+# 切换到 Alpha Vantage
+STRICTMODE_DATA_SOURCE=alphavantage
+STRICTMODE_DATA_API_KEY=your_api_key
 ```
 
 ## 🧪 测试
