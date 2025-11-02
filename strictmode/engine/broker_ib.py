@@ -46,6 +46,8 @@ class OrderRequest:
     # IBKR-specific linkage fields for bracket/child orders
     parent_id: int | None = None
     transmit: bool | None = None
+    # IB orderRef for grouping/filtering (e.g. "SM:TSLA")
+    order_ref: str | None = None
 
 
 @dataclass(slots=True)
@@ -177,16 +179,28 @@ class IBBroker:
         contract = self._contract(request.symbol, request.currency)
         from ib_insync import Order
 
+        # Round prices to valid tick increments to avoid error 110
+        inc = self._price_increment(
+            contract, float(request.limit_price or request.stop_price or 0.0)
+        )
+        lmt_price = request.limit_price
+        stp_price = request.stop_price
+        if request.order_type.upper() == "LMT" and lmt_price is not None:
+            lmt_price = self._round_to_increment(float(lmt_price), inc, mode="nearest")
+        if request.order_type.upper() in ("STP", "STP LMT") and stp_price is not None:
+            stp_price = self._round_to_increment(float(stp_price), inc, mode="nearest")
+
         order = Order(
             action="BUY" if request.side.upper() == "BUY" else "SELL",
             orderType=request.order_type.upper(),
             totalQuantity=abs(request.qty),
             tif=("DAY" if request.order_type.upper() == "MKT" and request.tif.upper() == "GTC" else request.tif),
-            lmtPrice=request.limit_price,
-            auxPrice=request.stop_price,
+            lmtPrice=lmt_price,
+            auxPrice=stp_price,
             outsideRth=request.outside_rth,
             parentId=request.parent_id,
             transmit=True if request.transmit is None else bool(request.transmit),
+            orderRef=request.order_ref,
         )
         trade = self.ib.placeOrder(contract, order)
         self.ib.sleep(1)
@@ -226,6 +240,7 @@ class IBBroker:
             auxPrice=parent.stop_price,
             outsideRth=parent.outside_rth,
             transmit=False,
+            orderRef=parent.order_ref,
         )
         parent_trade = self.ib.placeOrder(contract, parent_order)
         # Ensure parentId is available for child
@@ -242,6 +257,7 @@ class IBBroker:
             outsideRth=stop.outside_rth,
             parentId=parent_id,
             transmit=True,
+            orderRef=stop.order_ref or parent.order_ref,
         )
         stop_trade = self.ib.placeOrder(contract, stop_order)
         self.ib.sleep(1)
@@ -260,8 +276,11 @@ class IBBroker:
                 return
         raise ValueError(f"Order {order_id} not found")
 
-    def find_stop_orders(self, symbol: str) -> list[tuple[int, float]]:
-        """查找指定symbol的所有止损单，返回(order_id, stop_price)列表"""
+    def find_stop_orders(self, symbol: str, order_ref_prefix: str | None = None) -> list[tuple[int, float]]:
+        """Find open stop orders for symbol, optionally filtered by orderRef prefix.
+
+        Returns list of (order_id, stop_price).
+        """
         self.connect()
         trades = self.ib.openOrders()  # type: ignore[attr-defined]
         result: list[tuple[int, float]] = []
@@ -270,6 +289,13 @@ class IBBroker:
                 trade.contract.symbol == symbol  # type: ignore[attr-defined]
                 and trade.order.orderType.upper() in ("STP", "STP LMT")  # type: ignore[attr-defined]
             ):
+                if order_ref_prefix:
+                    try:
+                        ref = getattr(trade.order, "orderRef", None)
+                        if not (isinstance(ref, str) and ref.startswith(order_ref_prefix)):
+                            continue
+                    except Exception:
+                        continue
                 order_id = trade.order.orderId  # type: ignore[attr-defined]
                 stop_price = trade.order.auxPrice or trade.order.lmtPrice  # type: ignore[attr-defined]
                 if stop_price:
@@ -283,10 +309,15 @@ class IBBroker:
         for trade in orders:
             if trade.order.orderId == order_id:  # type: ignore[attr-defined]
                 order = trade.order
+                # Align prices to valid increments to avoid IB error 110
+                try:
+                    inc = self._price_increment(trade.contract, float(stop_price or limit_price or 0.0))
+                except Exception:
+                    inc = 0.01
                 if stop_price is not None:
-                    order.auxPrice = stop_price  # type: ignore[attr-defined]
+                    order.auxPrice = self._round_to_increment(float(stop_price), inc, mode="nearest")  # type: ignore[attr-defined]
                 if limit_price is not None:
-                    order.lmtPrice = limit_price  # type: ignore[attr-defined]
+                    order.lmtPrice = self._round_to_increment(float(limit_price), inc, mode="nearest")  # type: ignore[attr-defined]
                 trade = self.ib.placeOrder(trade.contract, order)  # type: ignore[attr-defined]
                 self.ib.sleep(1)
                 status = trade.orderStatus.status  # type: ignore[attr-defined]
@@ -310,6 +341,8 @@ class IBBroker:
                         "action": getattr(t.order, "action", None),
                         "tif": getattr(t.order, "tif", None),
                         "parentId": getattr(t.order, "parentId", None),
+                        "orderRef": getattr(t.order, "orderRef", None),
+                        "totalQuantity": getattr(t.order, "totalQuantity", None),
                         "lmtPrice": getattr(t.order, "lmtPrice", None),
                         "auxPrice": getattr(t.order, "auxPrice", None),
                     }
@@ -347,3 +380,27 @@ class DryRunBroker(IBBroker):
             OrderResponse(order_id=None, status="DRY_RUN", description="Dry run parent"),
             OrderResponse(order_id=None, status="DRY_RUN", description="Dry run stop"),
         )
+
+    def list_open_orders(self) -> list[dict]:  # type: ignore[override]
+        out: list[dict] = []
+        for idx, r in enumerate(self.orders, start=1):
+            try:
+                out.append(
+                    {
+                        "orderId": idx,
+                        "permId": 0,
+                        "symbol": r.symbol,
+                        "status": "DRY_RUN",
+                        "type": r.order_type,
+                        "action": r.side,
+                        "tif": r.tif,
+                        "parentId": r.parent_id,
+                        "orderRef": r.order_ref,
+                        "totalQuantity": r.qty,
+                        "lmtPrice": r.limit_price,
+                        "auxPrice": r.stop_price,
+                    }
+                )
+            except Exception:
+                pass
+        return out

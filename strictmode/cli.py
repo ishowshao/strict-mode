@@ -111,11 +111,6 @@ def buy(
     container = build_container()
     journal = container.journal
 
-    existing_position = journal.get_position(symbol)
-    if existing_position:
-        typer.echo(f"Position for {symbol} already exists with qty={existing_position.qty}")
-        raise typer.Exit(code=1)
-
     data_source = container.data_source()
     bars = data_source.get_adjusted_daily(symbol)
     df = _to_dataframe(bars)
@@ -160,6 +155,7 @@ def buy(
     if not dry_run and isinstance(broker, IBBroker) and ib_debug:
         broker.enable_debug(True)
 
+    order_ref = f"SM:{symbol}"
     buy_request = OrderRequest(
         symbol=symbol,
         qty=qty,
@@ -171,6 +167,7 @@ def buy(
         currency=currency,
         # Transmit parent immediately so TWS shows it as accepted
         transmit=None,  # default True in broker
+        order_ref=order_ref,
     )
     stop_request = OrderRequest(
         symbol=symbol,
@@ -181,6 +178,7 @@ def buy(
         tif="GTC",
         outside_rth=not rth,
         currency=currency,
+        order_ref=order_ref,
     )
 
     if dry_run:
@@ -199,14 +197,34 @@ def buy(
 
     now = datetime.utcnow()
 
-    journal.upsert_position(
-        Position(symbol=symbol, qty=qty, avg_price=fill_price, opened_at=now, paper=paper)
-    )
+    # Position aggregation: allow multiple BUYs; maintain weighted avg
+    existing_position = journal.get_position(symbol)
+    if existing_position:
+        new_qty = existing_position.qty + qty
+        new_avg = (
+            existing_position.avg_price * existing_position.qty + fill_price * qty
+        ) / new_qty
+        journal.upsert_position(
+            Position(
+                symbol=symbol,
+                qty=new_qty,
+                avg_price=new_avg,
+                opened_at=existing_position.opened_at,
+                paper=existing_position.paper,
+            )
+        )
+    else:
+        journal.upsert_position(
+            Position(symbol=symbol, qty=qty, avg_price=fill_price, opened_at=now, paper=paper)
+        )
     journal.upsert_symbol(symbol)
+    # DB keeps per-symbol analysis floor (Chandelier). Do not lower existing record
+    existing_stop = journal.get_stop(symbol)
+    db_stop_price = max(stop_price, existing_stop.stop_price) if existing_stop else stop_price
     journal.upsert_stop(
         Stop(
             symbol=symbol,
-            stop_price=stop_price,
+            stop_price=db_stop_price,
             method="chandelier",
             atr_n=config.atr_period,
             atr_k=config.atr_multiplier,
@@ -433,3 +451,77 @@ def show_orders(paper: bool = typer.Option(True, help="Use paper trading account
             )
     else:  # pragma: no cover - dry-run doesn't connect to IB
         typer.echo("DryRun broker has no open orders.")
+
+
+@app.command("reconcile-stops")
+def reconcile_stops(
+    symbol: str = typer.Argument(..., help="Ticker symbol"),
+    apply: bool = typer.Option(False, "--apply", help="Apply cancellations to reconcile stops"),
+    paper: bool = typer.Option(True, help="Use paper trading account"),
+    dry_run: bool = typer.Option(False, help="Dry run mode for planning only"),
+) -> None:
+    """Compare per-symbol STOP quantities with current position and plan cancellations to avoid oversell."""
+    container = build_container()
+    journal = container.journal
+    position = journal.get_position(symbol)
+    pos_qty = position.qty if position else 0.0
+
+    broker = container.broker(paper=paper, dry_run=dry_run)
+    if isinstance(broker, DryRunBroker):
+        typer.echo("DryRun broker: inferring open orders from dry-run stash")
+    try:
+        rows = broker.list_open_orders()  # type: ignore[attr-defined]
+    except Exception as e:  # pragma: no cover - runtime only
+        typer.echo(f"Failed to fetch open orders: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    # Filter STOPs belonging to StrictMode for this symbol
+    stops = [
+        r
+        for r in rows
+        if r.get("symbol") == symbol
+        and str(r.get("type", "")).upper().startswith("STP")
+        and isinstance(r.get("orderRef"), str)
+        and r.get("orderRef", "").startswith("SM:")
+    ]
+    total_stop_qty = float(sum(float(r.get("totalQuantity") or 0.0) for r in stops))
+    typer.echo(
+        f"Position qty={pos_qty}, STOPs count={len(stops)}, total STOP qty={total_stop_qty}"
+    )
+
+    if total_stop_qty <= pos_qty:
+        typer.echo("No reconciliation needed: STOP qty <= position qty")
+        return
+
+    # Plan: cancel whole STOP orders until total <= pos
+    # Prefer to cancel orders with highest stop price (closest to current price)
+    excess = total_stop_qty - pos_qty
+    stops_sorted = sorted(
+        stops,
+        key=lambda r: (float(r.get("auxPrice") or r.get("lmtPrice") or 0.0), int(r.get("orderId") or 0)),
+        reverse=True,
+    )
+    plan_ids: list[int] = []
+    remaining = excess
+    for r in stops_sorted:
+        if remaining <= 1e-9:
+            break
+        q = float(r.get("totalQuantity") or 0.0)
+        plan_ids.append(int(r.get("orderId")))
+        remaining -= q
+
+    typer.echo(f"Excess STOP qty={excess}. Plan to cancel {len(plan_ids)} order(s): {plan_ids}")
+    if not apply or dry_run:
+        typer.echo("Dry-run/preview only. Use --apply to execute.")
+        return
+
+    # Execute
+    cancelled = 0
+    for oid in plan_ids:
+        try:
+            broker.cancel_order(oid)
+            cancelled += 1
+            typer.echo(f"Cancelled STOP order {oid}")
+        except Exception as e:  # pragma: no cover - runtime only
+            typer.echo(f"Failed to cancel {oid}: {e}", err=True)
+    typer.echo(f"Reconcile complete. Cancelled={cancelled}")

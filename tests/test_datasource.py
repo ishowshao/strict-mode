@@ -55,7 +55,7 @@ def create_mock_yfinance_dataframe() -> pd.DataFrame:
 class MockYFinanceTicker:
     def __init__(self, symbol: str, hist_data: pd.DataFrame | None = None) -> None:
         self.symbol = symbol
-        self._hist_data = hist_data or create_mock_yfinance_dataframe()
+        self._hist_data = hist_data if hist_data is not None else create_mock_yfinance_dataframe()
 
     def history(self, start=None, end=None, auto_adjust=False) -> pd.DataFrame:
         return self._hist_data.copy()

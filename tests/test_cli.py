@@ -54,6 +54,23 @@ class StubBroker:
         self.modified.append((order_id, stop_price))
         return OrderResponse(order_id=order_id, status="UPDATED", description="stub")
 
+    def list_open_orders(self):  # minimal shape used by reconcile-stops
+        # Build rows from any staged orders
+        rows = []
+        for idx, r in enumerate(self.orders, start=1):
+            rows.append(
+                {
+                    "orderId": idx,
+                    "symbol": r.symbol,
+                    "type": r.order_type,
+                    "orderRef": getattr(r, "order_ref", f"SM:{r.symbol}"),
+                    "totalQuantity": r.qty,
+                    "auxPrice": r.stop_price,
+                    "lmtPrice": r.limit_price,
+                }
+            )
+        return rows
+
 
 class StubSettings:
     def __init__(self, db_url: str) -> None:
@@ -103,8 +120,18 @@ def test_buy_and_sell_cli(monkeypatch, runner, tmp_path):
     assert stop_record.stop_price == pytest.approx(position.avg_price * (1 - container.settings.strategy.initial_stop_pct))
 
     result_dup = runner.invoke(cli.app, ["buy", "TEST", "10", "--mkt", "--dry-run"])
-    assert result_dup.exit_code != 0
-    assert "already exists" in result_dup.output
+    assert result_dup.exit_code == 0, result_dup.output
+    # Multiple BUYs allowed; position aggregates quantity and weighted avg
+    position2 = container.journal.get_position("TEST")
+    assert position2 is not None and position2.qty == pytest.approx(20)
+    # Since both buys use the same latest close for fill, avg unchanged
+    assert position2.avg_price == pytest.approx(position.avg_price)
+    # DB stop should not be lowered; equals  (avg_price * (1 - pct)) in this deterministic stub
+    stop_record2 = container.journal.get_stop("TEST")
+    assert stop_record2 is not None
+    assert stop_record2.stop_price == pytest.approx(position2.avg_price * (1 - container.settings.strategy.initial_stop_pct))
+    # Dry-run broker captured four orders (2x parent + 2x stop)
+    assert len(container._broker.orders) == 4
 
     sell_result = runner.invoke(cli.app, ["sell-all", "TEST", "--mkt", "--dry-run"])
     assert sell_result.exit_code == 0, sell_result.output
@@ -137,3 +164,46 @@ def test_sync_data_days_limit(monkeypatch, runner):
     result = runner.invoke(cli.app, ["sync-data", "TEST", "--days", "120"])
     assert result.exit_code != 0
     assert "Maximum allowed window is 90 days." in result.output
+
+
+def test_reconcile_stops_dry_run(monkeypatch, runner, tmp_path):
+    container = StubContainer(tmp_path)
+    # Seed a position of 10 shares
+    container.journal.upsert_position(
+        cli.Position(symbol="TEST", qty=10, avg_price=100.0, opened_at=cli.datetime.utcnow(), paper=True)
+    )
+    # Seed two STOP orders for 12 shares total
+    container._broker.orders.append(
+        cli.OrderRequest(symbol="TEST", qty=5, side="SELL", order_type="STP", stop_price=95.0)
+    )
+    container._broker.orders.append(
+        cli.OrderRequest(symbol="TEST", qty=7, side="SELL", order_type="STP", stop_price=96.0)
+    )
+    # Ensure reconcile sees STOPs even without real IB backend
+    container._broker.list_open_orders = lambda: [
+        {
+            "orderId": 1,
+            "symbol": "TEST",
+            "type": "STP",
+            "orderRef": "SM:TEST",
+            "totalQuantity": 5,
+            "auxPrice": 95.0,
+            "lmtPrice": None,
+        },
+        {
+            "orderId": 2,
+            "symbol": "TEST",
+            "type": "STP",
+            "orderRef": "SM:TEST",
+            "totalQuantity": 7,
+            "auxPrice": 96.0,
+            "lmtPrice": None,
+        },
+    ]
+
+    monkeypatch.setattr(cli, "build_container", lambda: container)
+    res = runner.invoke(cli.app, ["reconcile-stops", "TEST", "--dry-run"])  # preview only
+    assert res.exit_code == 0, res.output
+    assert "total STOP qty" in res.output
+    assert "Plan to cancel" in res.output
+    assert "Dry-run/preview only" in res.output

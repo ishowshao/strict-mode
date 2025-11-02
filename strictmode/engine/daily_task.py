@@ -138,19 +138,29 @@ def daily_update_task(container: DependencyContainer) -> None:
                     if container.notifier:
                         container.notifier.send_message(f"🚨 {msg}")
 
-            # 检查是否需要更新止损单
+            # 检查是否需要更新止损单（逐张上调到不低于Chandelier，不下调）
             elif stop_today > previous_stop:
-                updated_count += 1
                 broker = container.broker(paper=position.paper, dry_run=False)
                 try:
-                    # 查找止损单并修改
-                    stop_orders = broker.find_stop_orders(symbol)
+                    updated_this_symbol = 0
+                    deltas: list[float] = []
+                    stop_orders = broker.find_stop_orders(symbol, order_ref_prefix="SM:")
                     if stop_orders:
-                        order_id, _ = stop_orders[0]  # 取第一个止损单
-                        broker.modify_order(order_id, stop_price=stop_today)
-                        msg = f"📈 Stop updated for {symbol}: {previous_stop:.2f} -> {stop_today:.2f}"
-                        journal.log("INFO", msg)
-                        summary_messages.append(msg)
+                        for order_id, current in stop_orders:
+                            new_price = max(float(current), float(stop_today))
+                            if new_price > float(current) + 1e-9:
+                                broker.modify_order(order_id, stop_price=new_price)
+                                updated_this_symbol += 1
+                                deltas.append(new_price - float(current))
+                        if updated_this_symbol:
+                            updated_count += updated_this_symbol
+                            msg = (
+                                f"📈 {symbol} raised {updated_this_symbol} stop(s) to >= {stop_today:.2f}"
+                            )
+                            if deltas:
+                                msg += f" (minΔ={min(deltas):.2f}, maxΔ={max(deltas):.2f})"
+                            journal.log("INFO", msg)
+                            summary_messages.append(msg)
                     else:
                         msg = f"⚠️ No stop order found for {symbol} to update"
                         journal.log("WARNING", msg)
@@ -159,7 +169,7 @@ def daily_update_task(container: DependencyContainer) -> None:
                     journal.log("ERROR", msg)
                     error_count += 1
 
-                # 更新数据库
+                # 更新数据库为当日Chandelier值
                 journal.upsert_stop(
                     Stop(
                         symbol=symbol,
@@ -191,4 +201,3 @@ def daily_update_task(container: DependencyContainer) -> None:
     journal.log("INFO", f"Daily update completed: updated={updated_count}, triggered={triggered_count}, errors={error_count}")
     if container.notifier:
         container.notifier.send_message(summary)
-

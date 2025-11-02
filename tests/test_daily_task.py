@@ -100,7 +100,8 @@ def test_daily_task_updates_stop(monkeypatch):
 
     data_source = StubDataSource({symbol: frame})
     broker = StubBroker()
-    broker.stop_orders[symbol] = [(1, 95.0)]
+    # Two child STOPs to validate multi-entry management
+    broker.stop_orders[symbol] = [(1, 95.0), (2, 104.5)]
     notifier = StubNotifier()
     journal = Journal("sqlite:///:memory:")
     journal.upsert_position(Position(symbol=symbol, qty=10, avg_price=100.0, opened_at=datetime.utcnow(), paper=True))
@@ -113,7 +114,10 @@ def test_daily_task_updates_stop(monkeypatch):
 
     updated_stop = journal.get_stop(symbol)
     assert updated_stop is not None and updated_stop.stop_price > 95.0
-    assert broker.modified and broker.modified[0][1] == pytest.approx(updated_stop.stop_price)
+    # Each modified STOP must be raised to max(current, chandelier_today)
+    initial = {1: 95.0, 2: 104.5}
+    for oid, new_price in broker.modified:
+        assert new_price == pytest.approx(max(initial[oid], updated_stop.stop_price))
     assert notifier.messages and any("Daily Update Summary" in msg for msg in notifier.messages)
 
 
