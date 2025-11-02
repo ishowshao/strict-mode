@@ -106,6 +106,7 @@ def buy(
     dry_run: bool = typer.Option(False, help="Dry run mode"),
     sl_type: str = typer.Option("chandelier", "--sl-type", help="Stop-loss method"),
     currency: str = typer.Option("USD", "--currency", help="Order currency"),
+    ib_debug: bool = typer.Option(False, "--ib-debug", help="Print IB API debug events"),
 ) -> None:
     container = build_container()
     journal = container.journal
@@ -141,7 +142,7 @@ def buy(
         raise typer.BadParameter("Limit price must be provided for limit orders")
 
     latest_bar = df.iloc[-1]
-    fill_price = limit_price if limit_price is not None else float(latest_bar["adj_close"])
+    fill_price = limit_price if limit_price is not None else float(latest_bar["close"])
 
     stop_pct = initial_stop_pct if initial_stop_pct is not None else container.settings.strategy.initial_stop_pct
     try:
@@ -156,6 +157,8 @@ def buy(
         raise typer.BadParameter(str(exc)) from exc
 
     broker = container.broker(paper=paper, dry_run=dry_run)
+    if not dry_run and isinstance(broker, IBBroker) and ib_debug:
+        broker.enable_debug(True)
 
     buy_request = OrderRequest(
         symbol=symbol,
@@ -166,6 +169,8 @@ def buy(
         tif=tif,
         outside_rth=not rth,
         currency=currency,
+        # Transmit parent immediately so TWS shows it as accepted
+        transmit=None,  # default True in broker
     )
     stop_request = OrderRequest(
         symbol=symbol,
@@ -180,11 +185,17 @@ def buy(
 
     if dry_run:
         typer.echo("Dry run mode: orders will not be sent to IBKR")
-    buy_response = broker.place_order(buy_request)
-    stop_response = broker.place_order(stop_request)
+    if not dry_run:
+        # Use bracket placement so child is attached and visible in TWS
+        buy_response, stop_response = broker.place_bracket(buy_request, stop_request)  # type: ignore[attr-defined]
+    else:
+        buy_response = broker.place_order(buy_request)
+        stop_response = broker.place_order(stop_request)
 
     typer.echo(f"Buy order status: {buy_response.status}")
     typer.echo(f"Stop order status: {stop_response.status} @ {stop_price:.2f}")
+    if buy_response.order_id is not None and stop_response.order_id is not None:
+        typer.echo(f"IB IDs: parent={buy_response.order_id} -> child={stop_response.order_id}")
 
     now = datetime.utcnow()
 
@@ -401,3 +412,24 @@ def show_data(
 
 if __name__ == "__main__":
     app()
+@app.command("show-orders")
+def show_orders(paper: bool = typer.Option(True, help="Use paper trading account")) -> None:
+    """Show a snapshot of open IBKR orders (for diagnostics)."""
+    container = build_container()
+    broker = container.broker(paper=paper, dry_run=False)
+    if isinstance(broker, IBBroker):
+        try:
+            rows = broker.list_open_orders()
+        except Exception as e:  # pragma: no cover - runtime only
+            typer.echo(f"Failed to fetch open orders: {e}", err=True)
+            raise typer.Exit(code=1)
+        if not rows:
+            typer.echo("No open orders.")
+            return
+        for r in rows:
+            typer.echo(
+                f"id={r['orderId']} parent={r['parentId']} sym={r['symbol']} {r['action']} {r['type']} tif={r['tif']} "
+                f"lmt={r['lmtPrice']} stp={r['auxPrice']} status={r['status']}"
+            )
+    else:  # pragma: no cover - dry-run doesn't connect to IB
+        typer.echo("DryRun broker has no open orders.")
