@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -104,8 +104,8 @@ def test_daily_task_updates_stop(monkeypatch):
     broker.stop_orders[symbol] = [(1, 95.0), (2, 104.5)]
     notifier = StubNotifier()
     journal = Journal("sqlite:///:memory:")
-    journal.upsert_position(Position(symbol=symbol, qty=10, avg_price=100.0, opened_at=datetime.utcnow(), paper=True))
-    journal.upsert_stop(Stop(symbol=symbol, stop_price=95.0, method="chandelier", atr_n=3, atr_k=2.0, updated_at=datetime.utcnow()))
+    journal.upsert_position(Position(symbol=symbol, qty=10, avg_price=100.0, opened_at=datetime.now(timezone.utc), paper=True))
+    journal.upsert_stop(Stop(symbol=symbol, stop_price=95.0, method="chandelier", atr_n=3, atr_k=2.0, updated_at=datetime.now(timezone.utc)))
 
     container = StubContainer(journal, _settings(), broker, data_source, notifier)
     monkeypatch.setattr("strictmode.engine.daily_task._get_market_date", lambda settings: target_day)
@@ -130,8 +130,8 @@ def test_daily_task_triggers_notification(monkeypatch):
     broker = StubBroker()
     notifier = StubNotifier()
     journal = Journal("sqlite:///:memory:")
-    journal.upsert_position(Position(symbol=symbol, qty=5, avg_price=100.0, opened_at=datetime.utcnow(), paper=True))
-    journal.upsert_stop(Stop(symbol=symbol, stop_price=95.0, method="chandelier", atr_n=3, atr_k=2.0, updated_at=datetime.utcnow()))
+    journal.upsert_position(Position(symbol=symbol, qty=5, avg_price=100.0, opened_at=datetime.now(timezone.utc), paper=True))
+    journal.upsert_stop(Stop(symbol=symbol, stop_price=95.0, method="chandelier", atr_n=3, atr_k=2.0, updated_at=datetime.now(timezone.utc)))
 
     container = StubContainer(journal, _settings(auto_liquidate=False), broker, data_source, notifier)
     monkeypatch.setattr("strictmode.engine.daily_task._get_market_date", lambda settings: target_day)
@@ -152,8 +152,8 @@ def test_daily_task_skips_on_data_lag(monkeypatch):
     broker = StubBroker()
     notifier = StubNotifier()
     journal = Journal("sqlite:///:memory:")
-    journal.upsert_position(Position(symbol=symbol, qty=3, avg_price=100.0, opened_at=datetime.utcnow(), paper=True))
-    journal.upsert_stop(Stop(symbol=symbol, stop_price=90.0, method="chandelier", atr_n=3, atr_k=2.0, updated_at=datetime.utcnow()))
+    journal.upsert_position(Position(symbol=symbol, qty=3, avg_price=100.0, opened_at=datetime.now(timezone.utc), paper=True))
+    journal.upsert_stop(Stop(symbol=symbol, stop_price=90.0, method="chandelier", atr_n=3, atr_k=2.0, updated_at=datetime.now(timezone.utc)))
 
     container = StubContainer(journal, _settings(), broker, data_source, notifier)
     monkeypatch.setattr("strictmode.engine.daily_task._get_market_date", lambda settings: target_day)

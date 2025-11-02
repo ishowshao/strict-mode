@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 
@@ -212,7 +212,7 @@ class Journal:
     def log(self, level: str, message: str, ctx: str | None = None) -> None:
         self.conn.execute(
             "INSERT INTO audit_log(ts, level, msg, ctx) VALUES (?, ?, ?, ?)",
-            (datetime.utcnow().isoformat(), level, message, ctx),
+            (datetime.now(timezone.utc).isoformat(), level, message, ctx),
         )
         self.conn.commit()
 

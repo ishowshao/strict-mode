@@ -204,8 +204,9 @@ def test_sync_data_days_limit(monkeypatch, runner):
 def test_reconcile_stops_dry_run(monkeypatch, runner, tmp_path):
     container = StubContainer(tmp_path)
     # Seed a position of 10 shares
+    from datetime import datetime, timezone
     container.journal.upsert_position(
-        cli.Position(symbol="TEST", qty=10, avg_price=100.0, opened_at=cli.datetime.utcnow(), paper=True)
+        cli.Position(symbol="TEST", qty=10, avg_price=100.0, opened_at=datetime.now(timezone.utc), paper=True)
     )
     # Seed two STOP orders for 12 shares total
     container._broker.orders.append(

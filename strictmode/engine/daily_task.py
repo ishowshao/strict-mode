@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytz
@@ -177,7 +177,7 @@ def daily_update_task(container: DependencyContainer) -> None:
                         method=stop_record.method,
                         atr_n=stop_record.atr_n,
                         atr_k=stop_record.atr_k,
-                        updated_at=datetime.utcnow(),
+                        updated_at=datetime.now(timezone.utc),
                     )
                 )
 

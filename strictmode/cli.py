@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
@@ -195,7 +195,7 @@ def buy(
     if buy_response.order_id is not None and stop_response.order_id is not None:
         typer.echo(f"IB IDs: parent={buy_response.order_id} -> child={stop_response.order_id}")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # Position aggregation: allow multiple BUYs; maintain weighted avg
     existing_position = journal.get_position(symbol)
@@ -330,7 +330,7 @@ def sell_all(
     journal.delete_position(symbol)
     journal.log("INFO", f"Closed position for {symbol}")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     journal.record_order(
         Order(
             id=str(uuid.uuid4()),
