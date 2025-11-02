@@ -10,3 +10,7 @@ __pycache__/
 # Database files
 *.db
 strictmode.db
+
+# Virtual environment
+.venv/
+venv/
