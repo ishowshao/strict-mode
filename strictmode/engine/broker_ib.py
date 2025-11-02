@@ -351,6 +351,41 @@ class IBBroker:
                 pass
         return out
 
+    def list_completed_orders(self, api_only: bool = True) -> list[dict]:  # pragma: no cover - runtime heavy
+        """Return a snapshot of recently completed orders (Filled/Cancelled/etc.).
+
+        The returned shape mirrors list_open_orders where possible.
+        """
+        self.connect()
+        out: list[dict] = []
+        try:
+            # ib_insync returns a list of Trade-like objects
+            trades = self.ib.reqCompletedOrders(apiOnly=api_only)  # type: ignore[attr-defined]
+            for t in trades or []:
+                try:
+                    out.append(
+                        {
+                            "orderId": int(getattr(t.order, "orderId", 0) or 0),
+                            "permId": int(getattr(t.order, "permId", 0) or 0),
+                            "symbol": getattr(t.contract, "symbol", None),
+                            "status": getattr(t.orderStatus, "status", None),
+                            "type": getattr(t.order, "orderType", None),
+                            "action": getattr(t.order, "action", None),
+                            "tif": getattr(t.order, "tif", None),
+                            "parentId": getattr(t.order, "parentId", None),
+                            "orderRef": getattr(t.order, "orderRef", None),
+                            "totalQuantity": getattr(t.order, "totalQuantity", None),
+                            "lmtPrice": getattr(t.order, "lmtPrice", None),
+                            "auxPrice": getattr(t.order, "auxPrice", None),
+                        }
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            # If API is not available or fails, return empty list to avoid breaking CLI.
+            return []
+        return out
+
 
 class DryRunBroker(IBBroker):
     def __init__(self) -> None:
@@ -404,3 +439,7 @@ class DryRunBroker(IBBroker):
             except Exception:
                 pass
         return out
+
+    def list_completed_orders(self, api_only: bool = True) -> list[dict]:  # type: ignore[override]
+        # Dry-run broker has no connection to IB; return empty.
+        return []

@@ -431,26 +431,62 @@ def show_data(
 if __name__ == "__main__":
     app()
 @app.command("show-orders")
-def show_orders(paper: bool = typer.Option(True, help="Use paper trading account")) -> None:
-    """Show a snapshot of open IBKR orders (for diagnostics)."""
+def show_orders(
+    paper: bool = typer.Option(True, help="Use paper trading account"),
+    state: str = typer.Option(
+        "live",
+        "--state",
+        case_sensitive=False,
+        help="Match TWS filters: all|live|cancelled|completed (default: live)",
+    ),
+    api_only: bool = typer.Option(True, help="Completed orders: API-only scope (IB API setting)"),
+) -> None:
+    """Show IBKR orders using TWS-style filters.
+
+    - live: active/working orders (PendingSubmit/PreSubmitted/Submitted/PendingCancel)
+    - cancelled: Cancelled/ApiCancelled (from Completed API)
+    - completed: Filled/Inactive (non-cancel final states from Completed API)
+    - all: live + cancelled + completed
+    """
     container = build_container()
     broker = container.broker(paper=paper, dry_run=False)
-    if isinstance(broker, IBBroker):
-        try:
-            rows = broker.list_open_orders()
-        except Exception as e:  # pragma: no cover - runtime only
-            typer.echo(f"Failed to fetch open orders: {e}", err=True)
-            raise typer.Exit(code=1)
-        if not rows:
-            typer.echo("No open orders.")
-            return
-        for r in rows:
-            typer.echo(
-                f"id={r['orderId']} parent={r['parentId']} sym={r['symbol']} {r['action']} {r['type']} tif={r['tif']} "
-                f"lmt={r['lmtPrice']} stp={r['auxPrice']} status={r['status']}"
-            )
-    else:  # pragma: no cover - dry-run doesn't connect to IB
-        typer.echo("DryRun broker has no open orders.")
+
+    rows: list[dict] = []
+    state_key = state.strip().lower()
+    allowed = {"all", "live", "cancelled", "completed"}
+    if state_key not in allowed:
+        raise typer.BadParameter(f"Invalid state '{state}'. Choose from: all, live, cancelled, completed")
+    try:
+        if state_key in ("live", "all"):
+            list_open = getattr(broker, "list_open_orders", None)
+            if callable(list_open):
+                rows.extend(list_open())
+        if state_key in ("completed", "cancelled", "all"):
+            list_completed = getattr(broker, "list_completed_orders", None)
+            completed = list_completed(api_only=api_only) if callable(list_completed) else []
+            upper = [dict(r) for r in completed]
+            # Split completed into cancelled vs completed per TWS semantics
+            cancelled_set = {"CANCELLED", "APICANCELLED"}
+            completed_set = {"FILLED", "INACTIVE", "EXPIRED"}
+            if state_key == "cancelled":
+                rows.extend([r for r in upper if str(r.get("status", "")).upper() in cancelled_set])
+            elif state_key == "completed":
+                rows.extend([r for r in upper if str(r.get("status", "")).upper() in completed_set])
+            else:  # all -> include both
+                rows.extend(upper)
+    except Exception as e:  # pragma: no cover - runtime only
+        typer.echo(f"Failed to fetch orders: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    if not rows:
+        typer.echo("No orders matching filters.")
+        return
+
+    for r in rows:
+        typer.echo(
+            f"id={r.get('orderId')} parent={r.get('parentId')} sym={r.get('symbol')} {r.get('action')} "
+            f"{r.get('type')} tif={r.get('tif')} lmt={r.get('lmtPrice')} stp={r.get('auxPrice')} status={r.get('status')}"
+        )
 
 
 @app.command("reconcile-stops")

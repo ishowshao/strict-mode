@@ -67,9 +67,44 @@ class StubBroker:
                     "totalQuantity": r.qty,
                     "auxPrice": r.stop_price,
                     "lmtPrice": r.limit_price,
+                    "parentId": r.parent_id,
+                    "tif": r.tif,
+                    "action": r.side,
+                    "status": "Submitted",
                 }
             )
         return rows
+
+    def list_completed_orders(self, api_only: bool = True):  # noqa: ARG002
+        # Provide one filled and one cancelled for CLI tests
+        return [
+            {
+                "orderId": 1001,
+                "symbol": "TEST",
+                "type": "LMT",
+                "orderRef": "SM:TEST",
+                "totalQuantity": 5,
+                "auxPrice": None,
+                "lmtPrice": 101.0,
+                "parentId": None,
+                "tif": "DAY",
+                "action": "BUY",
+                "status": "Filled",
+            },
+            {
+                "orderId": 1002,
+                "symbol": "TEST",
+                "type": "STP",
+                "orderRef": "SM:TEST",
+                "totalQuantity": 5,
+                "auxPrice": 95.0,
+                "lmtPrice": None,
+                "parentId": 1000,
+                "tif": "GTC",
+                "action": "SELL",
+                "status": "Cancelled",
+            },
+        ]
 
 
 class StubSettings:
@@ -207,3 +242,32 @@ def test_reconcile_stops_dry_run(monkeypatch, runner, tmp_path):
     assert "total STOP qty" in res.output
     assert "Plan to cancel" in res.output
     assert "Dry-run/preview only" in res.output
+
+
+def test_show_orders_filters(monkeypatch, runner, tmp_path):
+    container = StubContainer(tmp_path)
+    # Add two open orders
+    container._broker.orders.append(
+        cli.OrderRequest(symbol="TEST", qty=1, side="BUY", order_type="LMT", limit_price=100.0)
+    )
+    container._broker.orders.append(
+        cli.OrderRequest(symbol="TEST", qty=1, side="SELL", order_type="STP", stop_price=95.0)
+    )
+    monkeypatch.setattr(cli, "build_container", lambda: container)
+
+    # Default: only live
+    res_open = runner.invoke(cli.app, ["show-orders"])  # state=live
+    assert res_open.exit_code == 0
+    assert "status=Submitted" in res_open.output
+    assert "status=Filled" not in res_open.output
+
+    # Only completed
+    res_completed = runner.invoke(cli.app, ["show-orders", "--state", "completed"])
+    assert res_completed.exit_code == 0
+    assert "status=Filled" in res_completed.output
+    assert "status=Cancelled" not in res_completed.output
+
+    # Only cancelled
+    res_cancelled = runner.invoke(cli.app, ["show-orders", "--state", "cancelled"])
+    assert res_cancelled.exit_code == 0
+    assert "status=Cancelled" in res_cancelled.output
