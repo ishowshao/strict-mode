@@ -271,3 +271,64 @@ def test_show_orders_filters(monkeypatch, runner, tmp_path):
     res_cancelled = runner.invoke(cli.app, ["show-orders", "--state", "cancelled"])
     assert res_cancelled.exit_code == 0
     assert "status=Cancelled" in res_cancelled.output
+
+
+def test_cancel_cli(monkeypatch, runner, tmp_path):
+    container = StubContainer(tmp_path)
+    # Create live parent+child chain and one unrelated order
+    def _open_rows():
+        return [
+            {
+                "orderId": 1,
+                "symbol": "TEST",
+                "type": "LMT",
+                "orderRef": "SM:TEST",
+                "totalQuantity": 5,
+                "lmtPrice": 100.0,
+                "auxPrice": None,
+                "parentId": None,
+                "tif": "DAY",
+                "action": "BUY",
+                "status": "Submitted",
+            },
+            {
+                "orderId": 2,
+                "symbol": "TEST",
+                "type": "STP",
+                "orderRef": "SM:TEST",
+                "totalQuantity": 5,
+                "lmtPrice": None,
+                "auxPrice": 95.0,
+                "parentId": 1,
+                "tif": "GTC",
+                "action": "SELL",
+                "status": "Submitted",
+            },
+            {
+                "orderId": 99,
+                "symbol": "XYZ",
+                "type": "LMT",
+                "orderRef": "SM:XYZ",
+                "totalQuantity": 1,
+                "lmtPrice": 10.0,
+                "auxPrice": None,
+                "parentId": None,
+                "tif": "DAY",
+                "action": "BUY",
+                "status": "Submitted",
+            },
+        ]
+
+    container._broker.list_open_orders = _open_rows
+    monkeypatch.setattr(cli, "build_container", lambda: container)
+
+    # Preview by id: should include child 2
+    res_preview = runner.invoke(cli.app, ["cancel", "--id", "1", "--dry-run"])
+    assert res_preview.exit_code == 0
+    assert "Plan to cancel 2 order(s): [1, 2]" in res_preview.output
+
+    # Apply by symbol: cancel both 1 and 2, not 99
+    res_apply = runner.invoke(cli.app, ["cancel", "--symbol", "TEST", "--apply"])
+    assert res_apply.exit_code == 0
+    assert 1 in container._broker.cancelled and 2 in container._broker.cancelled
+    assert 99 not in container._broker.cancelled

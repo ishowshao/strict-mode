@@ -268,13 +268,37 @@ class IBBroker:
         )
 
     def cancel_order(self, order_id: int) -> None:
+        """Cancel a live order by IB orderId.
+
+        Searches open trades first (preferred, provides contract + status),
+        then falls back to open orders list.
+        """
         self.connect()
-        orders = self.ib.openOrders()  # type: ignore[attr-defined]
-        for trade in orders:
-            if trade.order.orderId == order_id:  # type: ignore[attr-defined]
-                self.ib.cancelOrder(trade.order)  # type: ignore[attr-defined]
-                return
-        raise ValueError(f"Order {order_id} not found")
+        # Prefer openTrades (Trade objects)
+        try:
+            trades = self.ib.openTrades()  # type: ignore[attr-defined]
+            for t in trades:
+                try:
+                    if int(t.order.orderId) == int(order_id):  # type: ignore[attr-defined]
+                        self.ib.cancelOrder(t.order)  # type: ignore[attr-defined]
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        # Fallback to openOrders (Order objects)
+        try:
+            orders = self.ib.openOrders()  # type: ignore[attr-defined]
+            for o in orders:
+                try:
+                    if int(getattr(o, "orderId", 0) or 0) == int(order_id):
+                        self.ib.cancelOrder(o)  # type: ignore[attr-defined]
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        raise ValueError(f"Order {order_id} not found among live orders")
 
     def find_stop_orders(self, symbol: str, order_ref_prefix: str | None = None) -> list[tuple[int, float]]:
         """Find open stop orders for symbol, optionally filtered by orderRef prefix.
@@ -282,47 +306,52 @@ class IBBroker:
         Returns list of (order_id, stop_price).
         """
         self.connect()
-        trades = self.ib.openOrders()  # type: ignore[attr-defined]
+        # Use openTrades to access both contract and order fields
+        trades = self.ib.openTrades()  # type: ignore[attr-defined]
         result: list[tuple[int, float]] = []
         for trade in trades:
             if (
-                trade.contract.symbol == symbol  # type: ignore[attr-defined]
-                and trade.order.orderType.upper() in ("STP", "STP LMT")  # type: ignore[attr-defined]
+                getattr(trade.contract, "symbol", None) == symbol
+                and str(getattr(trade.order, "orderType", "")).upper() in ("STP", "STP LMT")
             ):
                 if order_ref_prefix:
                     try:
                         ref = getattr(trade.order, "orderRef", None)
-                        if not (isinstance(ref, str) and ref.startswith(order_ref_prefix)):
+                        if not (isinstance(ref, str) and str(ref).startswith(order_ref_prefix)):
                             continue
                     except Exception:
                         continue
-                order_id = trade.order.orderId  # type: ignore[attr-defined]
-                stop_price = trade.order.auxPrice or trade.order.lmtPrice  # type: ignore[attr-defined]
-                if stop_price:
+                order_id = int(getattr(trade.order, "orderId", 0) or 0)
+                stop_price = getattr(trade.order, "auxPrice", None) or getattr(trade.order, "lmtPrice", None)
+                if stop_price is not None:
                     result.append((order_id, float(stop_price)))
         return result
 
     def modify_order(self, order_id: int, stop_price: float | None = None, limit_price: float | None = None) -> OrderResponse:
-        """修改现有订单的价格"""
+        """修改现有订单的价格（仅限 live 订单）。"""
         self.connect()
-        orders = self.ib.openOrders()  # type: ignore[attr-defined]
-        for trade in orders:
-            if trade.order.orderId == order_id:  # type: ignore[attr-defined]
-                order = trade.order
+        trades = self.ib.openTrades()  # type: ignore[attr-defined]
+        for t in trades:
+            try:
+                if int(getattr(t.order, "orderId", 0) or 0) != int(order_id):
+                    continue
+                order = t.order
                 # Align prices to valid increments to avoid IB error 110
                 try:
-                    inc = self._price_increment(trade.contract, float(stop_price or limit_price or 0.0))
+                    inc = self._price_increment(t.contract, float(stop_price or limit_price or 0.0))
                 except Exception:
                     inc = 0.01
                 if stop_price is not None:
                     order.auxPrice = self._round_to_increment(float(stop_price), inc, mode="nearest")  # type: ignore[attr-defined]
                 if limit_price is not None:
                     order.lmtPrice = self._round_to_increment(float(limit_price), inc, mode="nearest")  # type: ignore[attr-defined]
-                trade = self.ib.placeOrder(trade.contract, order)  # type: ignore[attr-defined]
+                trade = self.ib.placeOrder(t.contract, order)  # type: ignore[attr-defined]
                 self.ib.sleep(1)
                 status = trade.orderStatus.status  # type: ignore[attr-defined]
                 return OrderResponse(order_id=order_id, status=status, description=str(trade.order))
-        raise ValueError(f"Order {order_id} not found")
+            except Exception:
+                continue
+        raise ValueError(f"Order {order_id} not found among live orders")
 
     def list_open_orders(self) -> list[dict]:
         """Return a lightweight snapshot of open orders/trades for diagnostics."""

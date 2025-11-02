@@ -561,3 +561,78 @@ def reconcile_stops(
         except Exception as e:  # pragma: no cover - runtime only
             typer.echo(f"Failed to cancel {oid}: {e}", err=True)
     typer.echo(f"Reconcile complete. Cancelled={cancelled}")
+
+
+@app.command("cancel")
+def cancel_orders(
+    ids: list[int] = typer.Option(None, "--id", help="OrderId to cancel (repeatable)", show_default=False),
+    symbol: Optional[str] = typer.Option(None, "--symbol", help="Symbol filter (maps to orderRef=SM:{symbol})"),
+    order_ref: Optional[str] = typer.Option(None, "--order-ref", help="OrderRef prefix to filter (e.g., SM:TSLA)"),
+    include_children: bool = typer.Option(True, help="Also cancel child orders of selected parents"),
+    paper: bool = typer.Option(True, help="Use paper trading account"),
+    dry_run: bool = typer.Option(False, help="Preview cancellations without sending to IB"),
+    apply: bool = typer.Option(False, "--apply", help="Execute cancellations"),
+) -> None:
+    """Cancel live (working) orders by id or group. Defaults to include children."""
+    container = build_container()
+    broker = container.broker(paper=paper, dry_run=dry_run)
+
+    # Gather open (live) orders snapshot
+    try:
+        rows = broker.list_open_orders()  # type: ignore[attr-defined]
+    except Exception as e:  # pragma: no cover - runtime only
+        typer.echo(f"Failed to fetch open orders: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    # Resolve filter by orderRef
+    ref_prefix = order_ref
+    if ref_prefix is None and symbol is not None:
+        ref_prefix = f"SM:{symbol}"
+
+    # Select candidates
+    selected_ids: set[int] = set()
+    if ids:
+        id_set = set(int(i) for i in ids)
+        for r in rows:
+            oid = int(r.get("orderId") or 0)
+            if oid in id_set:
+                selected_ids.add(oid)
+    if ref_prefix:
+        for r in rows:
+            ref = r.get("orderRef")
+            if isinstance(ref, str) and ref.startswith(ref_prefix):
+                oid = int(r.get("orderId") or 0)
+                selected_ids.add(oid)
+
+    if not selected_ids:
+        typer.echo("No matching live orders to cancel.")
+        return
+
+    # Optionally include child orders for selected parents
+    if include_children:
+        parents = set(selected_ids)
+        for r in rows:
+            pid = r.get("parentId")
+            try:
+                pid_int = int(pid) if pid is not None else None
+            except Exception:
+                pid_int = None
+            if pid_int and pid_int in parents:
+                selected_ids.add(int(r.get("orderId") or 0))
+
+    plan = sorted(selected_ids)
+    typer.echo(f"Plan to cancel {len(plan)} order(s): {plan}")
+    if dry_run or not apply:
+        typer.echo("Dry-run/preview only. Use --apply to execute.")
+        return
+
+    # Execute cancellations
+    ok = 0
+    for oid in plan:
+        try:
+            broker.cancel_order(oid)
+            ok += 1
+            typer.echo(f"Cancelled order {oid}")
+        except Exception as e:  # pragma: no cover - runtime only
+            typer.echo(f"Failed to cancel {oid}: {e}", err=True)
+    typer.echo(f"Done. Cancelled={ok} / {len(plan)}")
