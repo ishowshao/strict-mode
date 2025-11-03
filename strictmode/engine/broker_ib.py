@@ -86,8 +86,15 @@ class IBBroker:
 
     def _contract(self, symbol: str, currency: str) -> Contract:
         from ib_insync import Stock
-        # Qualify the contract to avoid ambiguous symbols that can cause PendingSubmit
-        contract = Stock(symbol, "SMART", currency)
+        sym_u = symbol.upper().strip()
+        # Map HK Yahoo-style input (e.g., 9988.HK) to IBKR contract (e.g., 9988 on SEHK)
+        if sym_u.endswith(".HK"):
+            core = "".join(ch for ch in sym_u.split(".HK", 1)[0] if ch.isdigit())
+            ib_sym = core.lstrip("0") or "0"
+            contract = Stock(ib_sym, "SEHK", currency)
+        else:
+            # Default to US SMART routing
+            contract = Stock(symbol, "SMART", currency)
         try:
             self.connect()
             qualified = self.ib.qualifyContracts(contract)  # type: ignore[attr-defined]
@@ -309,9 +316,20 @@ class IBBroker:
         # Use openTrades to access both contract and order fields
         trades = self.ib.openTrades()  # type: ignore[attr-defined]
         result: list[tuple[int, float]] = []
+        sym_u = symbol.upper().strip()
+        # Helper to match IB contract symbol when CLI used HK Yahoo-style
+        def _matches(contract_symbol: str | None) -> bool:
+            if not contract_symbol:
+                return False
+            if sym_u.endswith(".HK"):
+                core = "".join(ch for ch in sym_u.split(".HK", 1)[0] if ch.isdigit())
+                ib_sym = core.lstrip("0") or "0"
+                return contract_symbol == ib_sym
+            return contract_symbol == symbol
+
         for trade in trades:
             if (
-                getattr(trade.contract, "symbol", None) == symbol
+                _matches(getattr(trade.contract, "symbol", None))
                 and str(getattr(trade.order, "orderType", "")).upper() in ("STP", "STP LMT")
             ):
                 if order_ref_prefix:

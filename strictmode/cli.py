@@ -16,7 +16,14 @@ from .engine.journal import Journal, Order, Position, Stop
 from .engine.notifier import TelegramNotifier
 from .rules.chandelier import ChandelierConfig, NotEnoughDataError, trailing_stop
 
-app = typer.Typer(help="StrictMode trading discipline CLI")
+app = typer.Typer(
+    help=(
+        "StrictMode trading discipline CLI\n\n"
+        "市场与代码格式: 仅支持美股与港股。港股代码必须以 .HK 结尾，且应为 4 位数字加 .HK（如 0700.HK、9988.HK）。"
+        "未带 .HK 的代码按美股处理；若为纯数字且查询无数据，CLI 会给出友好提示。\n"
+        "币种默认值: 美股默认 USD；.HK 结尾的港股默认 HKD（可用 --currency 显式覆盖）。"
+    )
+)
 
 
 class DependencyContainer:
@@ -87,6 +94,35 @@ def build_container() -> DependencyContainer:
     return DependencyContainer(settings)
 
 
+def _hk_hint(symbol: str) -> str | None:
+    """Return a friendly hint for HK symbols based on input format.
+
+    Policy: only US and HK supported. HK must end with .HK.
+    """
+    sym = str(symbol).strip()
+    sym_u = sym.upper()
+    if not sym_u.endswith(".HK") and sym.isdigit():
+        padded = sym.zfill(4)
+        return (
+            f"检测到纯数字代码。如为港股，请使用 {padded}.HK 形式（示例：9988.HK）。"
+            "当前仅支持美股与港股：未带 .HK 的代码将按美股处理。"
+        )
+    if sym_u.endswith(".HK") and not sym[:-3].isdigit():
+        return "港股代码需为4位数字加 .HK，例如 0700.HK、09888.HK。"
+    return None
+
+
+def _ib_symbol_matches(contract_symbol: str | None, user_symbol: str) -> bool:
+    if not contract_symbol:
+        return False
+    sym_u = user_symbol.upper().strip()
+    if sym_u.endswith(".HK"):
+        core = "".join(ch for ch in sym_u[:-3] if ch.isdigit())
+        ib_sym = core.lstrip("0") or "0"
+        return contract_symbol == ib_sym
+    return contract_symbol == user_symbol
+
+
 @app.command()
 def buy(
     symbol: str = typer.Argument(..., help="Ticker symbol"),
@@ -105,14 +141,22 @@ def buy(
     paper: bool = typer.Option(True, help="Use paper trading account"),
     dry_run: bool = typer.Option(False, help="Dry run mode"),
     sl_type: str = typer.Option("chandelier", "--sl-type", help="Stop-loss method"),
-    currency: str = typer.Option("USD", "--currency", help="Order currency"),
+    currency: Optional[str] = typer.Option(None, "--currency", help="Order currency (default: USD; HK tickers default to HKD)"),
     ib_debug: bool = typer.Option(False, "--ib-debug", help="Print IB API debug events"),
 ) -> None:
     container = build_container()
     journal = container.journal
 
     data_source = container.data_source()
-    bars = data_source.get_adjusted_daily(symbol)
+    # Fetch price bars with friendly error handling for HK tickers
+    try:
+        bars = data_source.get_adjusted_daily(symbol)
+    except Exception as e:
+        hint = _hk_hint(symbol)
+        typer.echo(f"获取行情失败：{e}")
+        if hint:
+            typer.echo(f"提示：{hint}")
+        raise typer.Exit(code=1)
     df = _to_dataframe(bars)
     config = ChandelierConfig(
         atr_period=atr_n or container.settings.strategy.atr_n,
@@ -155,6 +199,9 @@ def buy(
     if not dry_run and isinstance(broker, IBBroker) and ib_debug:
         broker.enable_debug(True)
 
+    # Determine order currency: HK tickers default to HKD; otherwise USD.
+    order_currency = currency or ("HKD" if str(symbol).upper().endswith(".HK") else "USD")
+
     order_ref = f"SM:{symbol}"
     buy_request = OrderRequest(
         symbol=symbol,
@@ -164,7 +211,7 @@ def buy(
         limit_price=limit_price,
         tif=tif,
         outside_rth=not rth,
-        currency=currency,
+        currency=order_currency,
         # Transmit parent immediately so TWS shows it as accepted
         transmit=None,  # default True in broker
         order_ref=order_ref,
@@ -177,7 +224,7 @@ def buy(
         stop_price=stop_price,
         tif="GTC",
         outside_rth=not rth,
-        currency=currency,
+        currency=order_currency,
         order_ref=order_ref,
     )
 
@@ -277,7 +324,11 @@ def sell_all(
     tif: str = typer.Option("DAY", help="Time in force"),
     paper: bool = typer.Option(True, help="Use paper trading"),
     dry_run: bool = typer.Option(False, help="Dry run mode"),
-    currency: str = typer.Option("USD", "--currency", help="Order currency"),
+    currency: Optional[str] = typer.Option(
+        None,
+        "--currency",
+        help="Order currency (default: USD; HK tickers default to HKD)",
+    ),
 ) -> None:
     container = build_container()
     journal = container.journal
@@ -285,6 +336,9 @@ def sell_all(
     position = journal.get_position(symbol)
     if position is None:
         typer.echo(f"No open position for {symbol}")
+        hint = _hk_hint(symbol)
+        if hint:
+            typer.echo(f"提示：{hint}")
         raise typer.Exit(code=1)
 
     order_qty = qty or position.qty
@@ -312,6 +366,9 @@ def sell_all(
             typer.echo(f"Warning: Failed to cancel stop orders: {e}", err=True)
         journal.delete_stop(symbol)
 
+    # Determine order currency: HK tickers default to HKD; otherwise USD.
+    order_currency = currency or ("HKD" if str(symbol).upper().endswith(".HK") else "USD")
+
     sell_request = OrderRequest(
         symbol=symbol,
         qty=order_qty,
@@ -319,7 +376,7 @@ def sell_all(
         order_type=order_type,
         limit_price=limit_price,
         tif=tif,
-        currency=currency,
+        currency=order_currency,
     )
 
     if dry_run:
@@ -374,7 +431,15 @@ def sync_data(
     end_date = _market_date(container.settings)
     start_date = end_date - timedelta(days=days - 1)
 
-    bars = data_source.get_adjusted_daily(symbol)
+    # Fetch price bars with friendly error handling for HK tickers
+    try:
+        bars = data_source.get_adjusted_daily(symbol)
+    except Exception as e:
+        hint = _hk_hint(symbol)
+        typer.echo(f"获取行情失败：{e}")
+        if hint:
+            typer.echo(f"提示：{hint}")
+        raise typer.Exit(code=1)
     df = _to_dataframe(bars).copy()
     df.index = pd.to_datetime(df.index)
     start_ts = pd.Timestamp(start_date)
@@ -419,6 +484,9 @@ def show_data(
     rows = journal.list_cached_prices(symbol, limit=limit, start=start_date, end=end_date, ascending=ascending)
     if not rows:
         typer.echo(f"No cached data for {symbol}. Run 'strictmode sync-data {symbol}' first.")
+        hint = _hk_hint(symbol)
+        if hint:
+            typer.echo(f"提示：{hint}")
         raise typer.Exit(code=0)
 
     for row in rows:
@@ -515,7 +583,7 @@ def reconcile_stops(
     stops = [
         r
         for r in rows
-        if r.get("symbol") == symbol
+        if _ib_symbol_matches(r.get("symbol"), symbol)
         and str(r.get("type", "")).upper().startswith("STP")
         and isinstance(r.get("orderRef"), str)
         and r.get("orderRef", "").startswith("SM:")

@@ -88,6 +88,14 @@ STRICTMODE_DRAWDOWN_PCT=0.10         # 可选：固定回撤百分比（10%）�
 
 ## 📖 使用指南
 
+### 市场与代码格式（重要）
+
+- 当前版本仅支持美股与港股。
+- 港股代码必须以 `.HK` 结尾，格式为“4位数字 + .HK”，例如：`0700.HK`（腾讯）、`9988.HK`（阿里巴巴）。
+- 美股代码为 1–5 位英文字母（如 `AAPL`、`TSLA`、`MSFT`）。
+- 币种默认：美股默认 `USD`；`.HK` 结尾的港股默认 `HKD`。可通过 `--currency` 显式覆盖。
+- 如果输入了纯数字但未加 `.HK`，系统会按美股处理；若 yfinance 无数据，CLI 将给出友好提示，而不是异常退出。
+
 ### 1. 建仓（买入并设置止损）
 
 ```bash
@@ -109,6 +117,9 @@ strictmode buy AAPL 5 --mkt --initial-stop-pct 0.05  # 第二次买入，会创�
 
 # 干跑模式（不实际下单，仅测试）
 strictmode buy AAPL 10 --mkt --dry-run
+
+# 港股示例：无需显式 --currency，默认 HKD
+strictmode buy 9988.HK 10 --mkt --dry-run
 ```
 
 **执行流程**：
@@ -138,6 +149,9 @@ strictmode sell-all AAPL --mkt --qty 5
 
 # 干跑模式
 strictmode sell-all AAPL --mkt --dry-run
+
+# 港股示例：无需显式 --currency，默认 HKD
+strictmode sell-all 9988.HK --mkt --dry-run
 ```
 
 **执行流程**：
@@ -218,6 +232,10 @@ strictmode sync-data AAPL --days 30 --truncate
 
 # 查看缓存的数据
 strictmode show-data AAPL
+
+# 港股示例
+strictmode sync-data 9988.HK --days 30
+strictmode show-data 9988.HK --limit 5
 
 # 查看最近 20 条数据（时间倒序）
 strictmode show-data AAPL --limit 20

@@ -174,6 +174,33 @@ def test_buy_and_sell_cli(monkeypatch, runner, tmp_path):
     assert container.journal.get_stop("TEST") is None
 
 
+def test_buy_hk_defaults_currency(monkeypatch, runner, tmp_path):
+    container = StubContainer(tmp_path)
+    monkeypatch.setattr(cli, "build_container", lambda: container)
+
+    res = runner.invoke(cli.app, ["buy", "9988.HK", "2", "--mkt", "--dry-run"])
+    assert res.exit_code == 0, res.output
+    # In dry-run, two orders are staged (parent + stop)
+    assert len(container._broker.orders) == 2
+    assert container._broker.orders[0].currency == "HKD"
+    assert container._broker.orders[1].currency == "HKD"
+
+
+def test_sell_hk_defaults_currency(monkeypatch, runner, tmp_path):
+    container = StubContainer(tmp_path)
+    # Seed an HK position
+    from datetime import datetime, timezone
+    container.journal.upsert_position(
+        cli.Position(symbol="9988.HK", qty=3, avg_price=100.0, opened_at=datetime.now(timezone.utc), paper=True)
+    )
+    monkeypatch.setattr(cli, "build_container", lambda: container)
+
+    res = runner.invoke(cli.app, ["sell-all", "9988.HK", "--mkt", "--dry-run"])
+    assert res.exit_code == 0, res.output
+    assert len(container._broker.orders) == 1
+    assert container._broker.orders[0].currency == "HKD"
+
+
 def test_sync_and_show_data_cli(monkeypatch, runner, tmp_path):
     container = StubContainer(tmp_path)
     container._data_source = StubDataSource(start="2023-01-01", periods=15)
