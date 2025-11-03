@@ -43,6 +43,7 @@ class StrategySettings:
 class AppSettings:
     tz_local: str = "Asia/Singapore"
     tz_market: str = "America/New_York"
+    tz_market2: str | None = None
     database_url: str = field(default_factory=lambda: f"sqlite:///{Path('strictmode.db').absolute()}")
     ib: IBSettings = field(default_factory=IBSettings)
     telegram: Optional[TelegramSettings] = None
@@ -65,6 +66,7 @@ def load_settings() -> AppSettings:
     settings = AppSettings()
     settings.tz_local = _env("TZ_LOCAL", settings.tz_local) or settings.tz_local
     settings.tz_market = _env("TZ_MARKET", settings.tz_market) or settings.tz_market
+    settings.tz_market2 = _env("TZ_MARKET2", settings.tz_market2) or settings.tz_market2
     settings.database_url = _env("DATABASE_URL", settings.database_url) or settings.database_url
 
     settings.ib = IBSettings(

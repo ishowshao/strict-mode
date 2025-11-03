@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from typing import Callable, Optional
 
 import pandas as pd
 import pytz
@@ -30,7 +31,11 @@ def _check_data_freshness(latest_date: date, target_date: date, symbol: str, con
     return True
 
 
-def daily_update_task(container: DependencyContainer) -> None:
+def _is_hk_symbol(symbol: str) -> bool:
+    return str(symbol).upper().strip().endswith(".HK")
+
+
+def daily_update_task(container: DependencyContainer, symbol_filter: Optional[Callable[[str], bool]] = None) -> None:
     """每日任务：更新所有持仓的止损价"""
     journal = container.journal
     settings = container.settings
@@ -49,6 +54,8 @@ def daily_update_task(container: DependencyContainer) -> None:
 
     for position in positions:
         symbol = position.symbol
+        if symbol_filter and not symbol_filter(symbol):
+            continue
         try:
             # 获取止损配置
             stop_record = journal.get_stop(symbol)
@@ -201,3 +208,27 @@ def daily_update_task(container: DependencyContainer) -> None:
     journal.log("INFO", f"Daily update completed: updated={updated_count}, triggered={triggered_count}, errors={error_count}")
     if container.notifier:
         container.notifier.send_message(summary)
+
+
+def _make_symbol_filter_for_tz(tz_market: str) -> Callable[[str], bool]:
+    tz = (tz_market or "").lower()
+    is_hk_tz = ("hong" in tz and "kong" in tz) or tz == "asia/hong_kong"
+    if is_hk_tz:
+        return _is_hk_symbol
+    # Non-HK session: process everything except HK tickers
+    return lambda s: not _is_hk_symbol(s)
+
+
+def daily_update_task_for_timezone(container: DependencyContainer, tz_market: str) -> None:
+    """Run the daily update with a temporary market timezone override.
+
+    This enables running separate schedules for multiple markets (e.g., SEHK and US).
+    """
+    # Temporarily override the market timezone used by _get_market_date
+    original = container.settings.tz_market
+    try:
+        container.settings.tz_market = tz_market
+        symbol_filter = _make_symbol_filter_for_tz(tz_market)
+        daily_update_task(container, symbol_filter=symbol_filter)
+    finally:
+        container.settings.tz_market = original

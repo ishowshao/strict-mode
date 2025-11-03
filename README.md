@@ -246,7 +246,7 @@ strictmode show-data AAPL --start 2024-01-01 --end 2024-01-31 --ascending
 
 ### 5. 每日自动更新止损
 
-启动后台服务，每日收盘后（美东时间 16:15）自动更新所有持仓的止损价：
+启动后台服务，按市场时区在收盘后（默认 16:15）自动更新所有持仓的止损价：
 
 ```bash
 strictmode-service
@@ -360,6 +360,12 @@ strictmode-service
 ```bash
 STRICTMODE_TZ_LOCAL=Asia/Singapore      # 本地时区
 STRICTMODE_TZ_MARKET=America/New_York   # 市场时区
+STRICTMODE_TZ_MARKET2=Asia/Hong_Kong    # 第二个市场时区（可选；启用后同时在该时区16:15再跑一次）
+
+当同时设置两个市场时区时：
+- 主时区任务（如美股 ET）只处理“非 .HK”标的。
+- 次时区任务（如港股 HKT）只处理“.HK”标的。
+- 两次任务都会生成各自的日报摘要；若有 Telegram 配置，会在各自任务结束后发送消息。
 ```
 
 ### 交易时段

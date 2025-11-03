@@ -5,36 +5,46 @@ import sys
 
 from .cli import DependencyContainer, build_container
 from .config import settings
-from .engine.daily_task import daily_update_task
+from .engine.daily_task import daily_update_task, daily_update_task_for_timezone
 from .engine.scheduler import DailyScheduler
 
 
 def main() -> None:
-    """启动每日任务调度器"""
+    """启动每日任务调度器（支持双市场计划任务）"""
     container = build_container()
-    scheduler = DailyScheduler(timezone=settings.tz_market)
+    primary_tz = settings.tz_market
+    secondary_tz = getattr(settings, "tz_market2", None)
 
-    # 注册每日任务（美东时间16:15，收盘后15分钟）
-    scheduler.add_daily_job(
-        lambda: daily_update_task(container),
-        hour=16,
-        minute=15,
-    )
+    scheduler = DailyScheduler(timezone=primary_tz)
+    scheduler.add_daily_job(lambda: daily_update_task_for_timezone(container, primary_tz), hour=16, minute=15)
+
+    scheduler2 = None
+    if secondary_tz and secondary_tz.strip() and secondary_tz != primary_tz:
+        scheduler2 = DailyScheduler(timezone=secondary_tz)
+        scheduler2.add_daily_job(lambda: daily_update_task_for_timezone(container, secondary_tz), hour=16, minute=15)
 
     def signal_handler(sig, frame):  # type: ignore
         print("\nShutting down scheduler...")
-        scheduler.shutdown()
-        container.journal.close()
+        try:
+            scheduler.shutdown()
+        finally:
+            if scheduler2:
+                scheduler2.shutdown()
+            container.journal.close()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    print(f"Starting StrictMode scheduler (timezone: {settings.tz_market})")
-    print("Daily task scheduled at 16:15 market time")
+    print(f"Starting StrictMode scheduler (primary tz: {primary_tz})")
+    print("Primary daily task at 16:15 local to primary tz")
+    if secondary_tz and secondary_tz != primary_tz:
+        print(f"Secondary scheduler enabled (tz: {secondary_tz}) at 16:15")
     print("Press Ctrl+C to stop")
 
     scheduler.start()
+    if scheduler2:
+        scheduler2.start()
 
     # 保持运行
     try:
@@ -46,4 +56,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
