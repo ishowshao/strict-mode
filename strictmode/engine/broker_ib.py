@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 from math import floor
+from decimal import Decimal, getcontext, ROUND_HALF_UP, ROUND_FLOOR, ROUND_CEILING
 
 
 def _import_ib_components():  # pragma: no cover - thin wrapper for retry
@@ -115,11 +116,7 @@ class IBBroker:
             cds = self.ib.reqContractDetails(contract)  # type: ignore[attr-defined]
             if cds:
                 cd = cds[0]
-                # Legacy field
-                min_tick = getattr(cd, "minTick", None)
-                if isinstance(min_tick, (int, float)) and min_tick and min_tick > 0:
-                    return float(min_tick)
-                # Market rule-based increments
+                # Prefer market rule-based increments if available
                 market_rule_ids = getattr(cd, "marketRuleIds", None)
                 if market_rule_ids:
                     rid_str = str(market_rule_ids).split(",")[0].strip()
@@ -128,30 +125,70 @@ class IBBroker:
                     if increments:
                         inc: float | None = None
                         for pi in increments:
-                            # Choose the increment with highest lowEdge <= price
                             if price >= float(getattr(pi, "lowEdge", 0.0)):
                                 inc = float(getattr(pi, "increment", 0.01))
                             else:
                                 break
                         if inc:
                             return inc
+                # Fallback to minTick only when market rules are not available
+                min_tick = getattr(cd, "minTick", None)
+                if isinstance(min_tick, (int, float)) and min_tick and min_tick > 0:
+                    # For SEHK, minTick can be misleading; prefer HKEX table below
+                    ex = str(getattr(contract, "exchange", "") or "").upper()
+                    if ex != "SEHK":
+                        return float(min_tick)
         except Exception:
             pass
-        # Default for US stocks
+        # Fallbacks when market rules are unavailable
+        try:
+            ex = str(getattr(contract, "exchange", "") or "").upper()
+        except Exception:
+            ex = ""
+
+        # HKEX (SEHK) tick-size table fallback (Main Board equities)
+        if ex == "SEHK" and price > 0:
+            p = float(price)
+            if p < 0.25:
+                return 0.001
+            if p < 0.5:
+                return 0.005
+            if p < 10:
+                return 0.01
+            if p < 20:
+                return 0.02
+            if p < 100:
+                return 0.05
+            if p < 200:
+                return 0.10
+            if p < 500:
+                return 0.20
+            if p < 1000:
+                return 0.50
+            if p < 2000:
+                return 1.00
+            if p < 5000:
+                return 2.00
+            return 5.00
+
+        # Default for US stocks and unknown exchanges
         return 0.01
 
     def _round_to_increment(self, price: float, inc: float, mode: str = "nearest") -> float:
         if inc <= 0:
             return price
-        # Avoid FP artifacts
-        steps = price / inc
+        # Decimal-based rounding to avoid FP artifacts and banker rounding
+        getcontext().prec = 28
+        p = Decimal(str(price))
+        i = Decimal(str(inc))
+        steps = p / i
         if mode == "down":
-            steps = floor(steps + 1e-9)
+            steps_q = steps.to_integral_value(rounding=ROUND_FLOOR)
         elif mode == "up":
-            steps = floor(steps + 0.999999)
+            steps_q = steps.to_integral_value(rounding=ROUND_CEILING)
         else:
-            steps = round(steps)
-        return round(steps * inc, 10)
+            steps_q = steps.to_integral_value(rounding=ROUND_HALF_UP)
+        return float((steps_q * i).quantize(i))
 
     # --- Debug helpers -----------------------------------------------------
     def enable_debug(self, enabled: bool = True) -> None:

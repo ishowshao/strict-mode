@@ -360,3 +360,16 @@ def test_cancel_cli(monkeypatch, runner, tmp_path):
     assert res_apply.exit_code == 0
     assert 1 in container._broker.cancelled and 2 in container._broker.cancelled
     assert 99 not in container._broker.cancelled
+
+
+def test_tick_size_cli(runner):
+    res_hk = runner.invoke(cli.app, ["tick-size", "9988.HK", "154.85", "--mode", "nearest"])
+    assert res_hk.exit_code == 0
+    assert "exchange=SEHK" in res_hk.output
+    # 154.85 with 0.1 tick -> 154.9 (nearest)
+    assert "rounded=154.9" in res_hk.output
+
+    res_us = runner.invoke(cli.app, ["tick-size", "AAPL", "256.857", "--mode", "down"])
+    assert res_us.exit_code == 0
+    assert "exchange=US/SMART" in res_us.output
+    assert "rounded=256.85" in res_us.output

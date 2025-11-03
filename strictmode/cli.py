@@ -15,6 +15,7 @@ from .engine.broker_ib import DryRunBroker, IBBroker, OrderRequest
 from .engine.journal import Journal, Order, Position, Stop
 from .engine.notifier import TelegramNotifier
 from .rules.chandelier import ChandelierConfig, NotEnoughDataError, trailing_stop
+from .engine.ticks import hk_tick, round_to_increment
 
 app = typer.Typer(
     help=(
@@ -555,6 +556,28 @@ def show_orders(
             f"id={r.get('orderId')} parent={r.get('parentId')} sym={r.get('symbol')} {r.get('action')} "
             f"{r.get('type')} tif={r.get('tif')} lmt={r.get('lmtPrice')} stp={r.get('auxPrice')} status={r.get('status')}"
         )
+
+
+@app.command("tick-size")
+def tick_size(
+    symbol: str = typer.Argument(..., help="Ticker symbol (.HK for Hong Kong)"),
+    price: float = typer.Argument(..., help="Reference price to evaluate increment"),
+    mode: str = typer.Option("nearest", help="Rounding mode: nearest|down|up"),
+) -> None:
+    """Offline helper to show tick size and rounded price without connecting to IBKR.
+
+    - For .HK symbols, uses HKEX main board table.
+    - Otherwise, assumes 0.01 increment (US stocks).
+    """
+    sym_u = symbol.upper().strip()
+    if sym_u.endswith(".HK"):
+        inc = hk_tick(price)
+        exch = "SEHK"
+    else:
+        inc = 0.01
+        exch = "US/SMART"
+    rounded = round_to_increment(price, inc, mode=mode)
+    typer.echo(f"exchange={exch} inc={inc} price={price} -> rounded={rounded} (mode={mode})")
 
 
 @app.command("reconcile-stops")
