@@ -373,3 +373,55 @@ def test_tick_size_cli(runner):
     assert res_us.exit_code == 0
     assert "exchange=US/SMART" in res_us.output
     assert "rounded=256.85" in res_us.output
+
+
+def test_chandelier_table_from_cache(monkeypatch, runner, tmp_path):
+    # Prepare container and seed cache with deterministic bars
+    container = StubContainer(tmp_path)
+    monkeypatch.setattr(cli, "build_container", lambda: container)
+
+    # Seed 15 days of cache: open=100+i, high=open+1, low=open-1, close=open+0.5, adj_close=close*2
+    import datetime as _dt
+    start = _dt.date(2023, 1, 1)
+    for i in range(15):
+        d = start + _dt.timedelta(days=i)
+        o = 100 + i
+        h = o + 1
+        l = o - 1
+        c = o + 0.5
+        container.journal.cache_price_data(
+            symbol="TEST",
+            price_date=d,
+            open_price=o,
+            high=h,
+            low=l,
+            close=c,
+            adj_close=c * 2.0,  # constant ratio 2x
+        )
+    # Use strategy defaults from StubSettings: atr_n=3, atr_k=2.0
+    # Entry on 2023-01-05 -> should print days after entry
+    res = runner.invoke(cli.app, [
+        "chandelier-table",
+        "TEST",
+        "--entry",
+        "2023-01-05",
+        "--days",
+        "5",
+    ])
+    assert res.exit_code == 0, res.output
+    # Header present with initial stop percentage (5.0%)
+    assert "TEST | ATR(n=3) k=2.0 init_stop=5.0% | entry=2023-01-05" in res.output
+    lines = res.output.splitlines()
+    # First calculable day with n=3 ATR is 2023-01-03 and should be present with '-' stop
+    # n_from_entry for 2023-01-03 relative to entry 2023-01-05 is -2
+    assert any(ln.startswith("2023-01-03") and " | - | - | -2" in ln for ln in lines)
+    # Entry day shows percentage stop (not '-') and n_from_entry=0
+    entry_line = next(ln for ln in lines if ln.startswith("2023-01-05"))
+    parts = [p.strip() for p in entry_line.split("|")]
+    # Columns: date, adj_close, ATR, Chandelier, Stop, ΔStop, n
+    assert parts[-1] == "0"
+    assert parts[-2] == "-"  # ΔStop is '-'
+    assert parts[-3] != "-"  # Stop value should be numeric
+    # There should be 5 rows after entry (n=1..5)
+    post_rows = [ln for ln in lines if ln.startswith("2023-") and ln.endswith(" | 1") or ln.endswith(" | 2") or ln.endswith(" | 3") or ln.endswith(" | 4") or ln.endswith(" | 5")]
+    assert len(post_rows) >= 5

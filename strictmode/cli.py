@@ -15,6 +15,7 @@ from .engine.broker_ib import DryRunBroker, IBBroker, OrderRequest
 from .engine.journal import Journal, Order, Position, Stop
 from .engine.notifier import TelegramNotifier
 from .rules.chandelier import ChandelierConfig, NotEnoughDataError, trailing_stop
+from .engine.analysis import build_chandelier_table
 from .engine.ticks import hk_tick, round_to_increment
 
 app = typer.Typer(
@@ -496,7 +497,109 @@ def show_data(
             f"low={row['low']:.2f} close={row['close']:.2f} adj_close={row['adj_close']:.2f}"
         )
 
+@app.command("chandelier-table")
+def chandelier_table(
+    symbol: str = typer.Argument(..., help="Ticker symbol"),
+    entry: Optional[datetime] = typer.Option(
+        None, "--entry", help="Entry date (YYYY-MM-DD). Default: first calculable day"
+    ),
+    days: Optional[int] = typer.Option(
+        None, "--days", help="Number of trading days after entry to display"
+    ),
+    atr_n: Optional[int] = typer.Option(None, help="ATR window override"),
+    atr_k: Optional[float] = typer.Option(None, help="ATR multiplier override"),
+    ascending: bool = typer.Option(True, help="Print in chronological order"),
+    csv: Optional[str] = typer.Option(None, "--csv", help="Optional CSV output path"),
+) -> None:
+    """Print a verification table of ATR/Chandelier and trailing stop using cached data only.
 
+    - Uses canonical ATR/Chandelier functions from rules.chandelier
+    - Trailing stop starts from the chosen entry day and never decreases
+    - Shows rows strictly after entry day: n_from_entry = 1..N
+    """
+    if days is not None and days <= 0:
+        raise typer.BadParameter("--days must be positive")
+
+    container = build_container()
+    journal = container.journal
+
+    # Pull all cached rows in ascending order
+    rows = journal.list_cached_prices(symbol, limit=None, start=None, end=None, ascending=True)
+    if not rows:
+        typer.echo(f"No cached data for {symbol}. Run 'strictmode sync-data {symbol}' first.")
+        hint = _hk_hint(symbol)
+        if hint:
+            typer.echo(f"提示：{hint}")
+        raise typer.Exit(code=1)
+
+    config = ChandelierConfig(
+        atr_period=atr_n or container.settings.strategy.atr_n,
+        atr_multiplier=atr_k or container.settings.strategy.atr_k,
+        drawdown_pct=None,  # explicitly off for verification
+    )
+
+    try:
+        result = build_chandelier_table(
+            symbol,
+            rows,
+            config=config,
+            entry=entry.date() if entry else None,
+            days=days,
+            initial_stop_pct=container.settings.strategy.initial_stop_pct,
+        )
+    except NotEnoughDataError as e:
+        typer.echo(f"数据不足：{e}")
+        raise typer.Exit(code=1)
+    except Exception as e:  # noqa: BLE001
+        typer.echo(f"生成表格失败：{e}")
+        raise typer.Exit(code=1)
+
+    df = result.table.copy()
+    if df.empty:
+        typer.echo("No rows to display for the requested window.")
+        raise typer.Exit(code=0)
+
+    # Formatting
+    df_print = df.copy()
+    # numeric formatting
+    for col in ("adj_close", "atr", "chandelier"):
+        if col in df_print.columns:
+            df_print[col] = df_print[col].astype(float).map(lambda x: f"{x:.4f}" if pd.notna(x) else "")
+
+    used_pct = float(container.settings.strategy.initial_stop_pct)
+    header = (
+        f"{symbol} | ATR(n={result.config.atr_period}) k={result.config.atr_multiplier} "
+        f"init_stop={used_pct*100:.1f}% | entry={result.entry_date.date()}"
+    )
+    typer.echo(header)
+    # Print header row
+    typer.echo("date | adj_close | ATR | Chandelier | Stop(trailing) | ΔStop | n_from_entry")
+    iter_df = df_print if ascending else df_print.iloc[::-1]
+    for idx, row in iter_df.iterrows():
+        n = int(row["n_from_entry"])  # type: ignore[index]
+        # stop/delta formatting: show '-' for n<0; entry day delta '-'
+        stop_val = df.loc[idx, "stop_trailing"]
+        if n < 0 or pd.isna(stop_val):
+            stop_str = "-"
+            delta_str = "-"
+        else:
+            stop_str = f"{float(stop_val):.4f}"
+            delta_val = df.loc[idx, "delta_stop"]
+            delta_str = f"{float(delta_val):.4f}" if pd.notna(delta_val) and n >= 1 else "-"
+
+        typer.echo(
+            f"{idx.date()} | {row['adj_close']} | {row['atr']} | {row['chandelier']} | "
+            f"{stop_str} | {delta_str} | {n}"
+        )
+
+    if csv:
+        try:
+            # Save unformatted numeric values
+            df.to_csv(csv, index=True, index_label="date")
+            typer.echo(f"Saved CSV to {csv}")
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"保存 CSV 失败：{e}", err=True)
+            
 if __name__ == "__main__":
     app()
 @app.command("show-orders")
