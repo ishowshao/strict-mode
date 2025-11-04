@@ -20,12 +20,13 @@ StrictMode 是一个**无界面的命令行工具**，帮助你严格执行股�
 - **支持限价/市价订单**：灵活的交易方式
 - **订单管理**：查看、取消、对账订单，支持按标的或订单ID筛选
 
-### 📈 数据管理
+### 📈 数据管理与验证
 
 - **复权数据支持**：自动处理复权价格，确保计算准确
 - **本地数据缓存**：减少 API 调用，提高效率
 - **历史数据查看**：方便查看和验证数据
 - **多数据源支持**：默认使用 yfinance（免费），可切换至 Alpha Vantage
+- **止损计算验证**：离线验证工具展示 ATR/Chandelier 完整计算过程，支持参数调优和回测分析
 
 ### 🔔 通知提醒
 
@@ -244,7 +245,80 @@ strictmode show-data AAPL --limit 20
 strictmode show-data AAPL --start 2024-01-01 --end 2024-01-31 --ascending
 ```
 
-### 5. 每日自动更新止损
+### 5. 验证止损计算
+
+使用 `chandelier-table` 命令可以离线验证 ATR/Chandelier 止损计算逻辑，无需连接 IBKR：
+
+```bash
+# 基本用法：显示 AAPL 的止损计算表
+strictmode chandelier-table AAPL
+
+# 指定入场日期和展示天数
+strictmode chandelier-table AAPL --entry 2024-01-15 --days 30
+
+# 自定义 ATR 参数测试不同策略
+strictmode chandelier-table AAPL --atr-n 14 --atr-k 2.5
+
+# 导出 CSV 供外部分析
+strictmode chandelier-table AAPL --entry 2024-01-15 --csv output.csv
+
+# 倒序查看（从最新到最旧）
+strictmode chandelier-table AAPL --ascending false
+
+# 港股示例
+strictmode chandelier-table 9988.HK --entry 2024-06-01 --days 60
+```
+
+**输出说明**：
+- **date**：交易日期
+- **adj_close**：复权收盘价
+- **ATR**：平均真实波幅
+- **Chandelier**：吊灯止损价（最高价 - K × ATR）
+- **Stop(trailing)**：追踪止损价（只上提不下放）
+- **ΔStop**：相对前一日的止损价变动量
+- **n_from_entry**：相对入场日期的天数偏移（0 = 入场日，负数 = 入场前，正数 = 入场后）
+
+**使用场景**：
+- **验证计算准确性**：对比手工计算和系统计算结果
+- **策略参数调优**：测试不同 ATR 周期和乘数的效果
+- **回测分析**：查看历史止损轨迹，评估策略表现
+- **数据质量检查**：确认 ATR 预热期数据是否充足
+
+**注意事项**：
+- 仅使用本地缓存数据，请先运行 `sync-data` 确保数据最新
+- 入场前的数据（n_from_entry < 0）用于 ATR 计算预热，止损值显示为 `-`
+- 入场当日（n_from_entry = 0）使用初始百分比止损
+- 入场后（n_from_entry >= 1）使用 Chandelier 追踪止损
+
+#### 价格跳动单位验证
+
+使用 `tick-size` 命令可以离线查询和验证价格舍入逻辑，避免 IBKR 错误 110：
+
+```bash
+# 查询港股价格的最小跳动单位和舍入结果
+strictmode tick-size 9988.HK 154.85
+
+# 指定舍入模式
+strictmode tick-size 9988.HK 154.85 --mode nearest  # 最接近（默认）
+strictmode tick-size 9988.HK 154.85 --mode down     # 向下舍入
+strictmode tick-size 9988.HK 154.85 --mode up       # 向上舍入
+
+# 美股示例
+strictmode tick-size AAPL 256.857 --mode down
+```
+
+**输出示例**：
+```
+exchange=SEHK inc=0.1 price=154.85 -> rounded=154.9 (mode=nearest)
+exchange=US/SMART inc=0.01 price=256.857 -> rounded=256.85 (mode=down)
+```
+
+**使用场景**：
+- 调试订单价格问题
+- 验证限价单价格是否合规
+- 了解不同交易所的价格规则
+
+### 6. 每日自动更新止损
 
 启动后台服务，按市场时区在收盘后（默认 16:15）自动更新所有持仓的止损价：
 
