@@ -661,6 +661,55 @@ def show_orders(
         )
 
 
+@app.command("show-positions")
+def show_positions(
+    paper: bool = typer.Option(True, help="Use paper trading account"),
+    dry_run: bool = typer.Option(False, help="Dry run mode (no IBKR connection)"),
+    csv: Optional[str] = typer.Option(None, "--csv", help="Optional CSV output path"),
+):
+    """Show IBKR portfolio positions via TWS/Gateway.
+
+    - Normalizes HK tickers to XXXX.HK for display.
+    - Dry run returns empty (useful for testing).
+    """
+    container = build_container()
+    broker = container.broker(paper=paper, dry_run=dry_run)
+    try:
+        list_positions = getattr(broker, "list_positions", None)
+        rows = list_positions() if callable(list_positions) else []
+    except Exception as e:  # pragma: no cover - runtime only
+        typer.echo(f"Failed to fetch positions: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    if not rows:
+        typer.echo("No positions.")
+        return
+
+    for r in rows:
+        typer.echo(
+            f"sym={r.get('symbol')} qty={float(r.get('qty') or 0.0)} avg={r.get('avgCost')} ccy={r.get('currency')}"
+        )
+
+    if csv:
+        import csv as _csv
+        try:
+            with open(csv, "w", newline="") as f:
+                writer = _csv.DictWriter(f, fieldnames=["symbol", "qty", "avgCost", "currency"])  # type: ignore[list-item]
+                writer.writeheader()
+                for r in rows:
+                    writer.writerow(
+                        {
+                            "symbol": r.get("symbol"),
+                            "qty": float(r.get("qty") or 0.0),
+                            "avgCost": r.get("avgCost"),
+                            "currency": r.get("currency"),
+                        }
+                    )
+            typer.echo(f"Saved CSV to {csv}")
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"保存 CSV 失败：{e}", err=True)
+
+
 @app.command("tick-size")
 def tick_size(
     symbol: str = typer.Argument(..., help="Ticker symbol (.HK for Hong Kong)"),

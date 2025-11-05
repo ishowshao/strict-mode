@@ -435,6 +435,68 @@ class IBBroker:
                 pass
         return out
 
+    def list_positions(self) -> list[dict]:
+        """Return IBKR portfolio positions with normalized symbols.
+
+        Output shape per row:
+        {"symbol": str, "qty": float, "avgCost": float | None, "currency": str | None}
+        """
+        self.connect()
+        out: list[dict] = []
+        # Prefer portfolio() (includes averageCost) and fall back to positions()
+        try:
+            pf = getattr(self.ib, "portfolio", None)  # type: ignore[attr-defined]
+            items = pf() if callable(pf) else []
+        except Exception:
+            items = []
+        if items:
+            for it in items:
+                try:
+                    c = it.contract
+                    sym = getattr(c, "symbol", None)
+                    exch = str(getattr(c, "exchange", "") or "").upper()
+                    cur = getattr(c, "currency", None)
+                    # Normalize HK symbols to Yahoo-style 4-digit + .HK for the CLI
+                    if exch == "SEHK" and isinstance(sym, str) and sym.isdigit():
+                        sym = sym.zfill(4) + ".HK"
+                    out.append(
+                        {
+                            "symbol": sym,
+                            "qty": float(getattr(it, "position", 0.0) or 0.0),
+                            "avgCost": float(getattr(it, "averageCost", 0.0) or 0.0) or None,
+                            "currency": cur,
+                        }
+                    )
+                except Exception:
+                    continue
+            return out
+
+        # Fallback: positions() -> Position objects with avgCost
+        try:
+            pos_list = getattr(self.ib, "positions", None)  # type: ignore[attr-defined]
+            pitems = pos_list() if callable(pos_list) else []
+        except Exception:
+            pitems = []
+        for p in pitems:
+            try:
+                c = p.contract
+                sym = getattr(c, "symbol", None)
+                exch = str(getattr(c, "exchange", "") or "").upper()
+                cur = getattr(c, "currency", None)
+                if exch == "SEHK" and isinstance(sym, str) and sym.isdigit():
+                    sym = sym.zfill(4) + ".HK"
+                out.append(
+                    {
+                        "symbol": sym,
+                        "qty": float(getattr(p, "position", 0.0) or 0.0),
+                        "avgCost": float(getattr(p, "avgCost", 0.0) or 0.0) or None,
+                        "currency": cur,
+                    }
+                )
+            except Exception:
+                continue
+        return out
+
     def list_completed_orders(self, api_only: bool = True) -> list[dict]:  # pragma: no cover - runtime heavy
         """Return a snapshot of recently completed orders (Filled/Cancelled/etc.).
 
@@ -526,4 +588,8 @@ class DryRunBroker(IBBroker):
 
     def list_completed_orders(self, api_only: bool = True) -> list[dict]:  # type: ignore[override]
         # Dry-run broker has no connection to IB; return empty.
+        return []
+
+    def list_positions(self) -> list[dict]:  # type: ignore[override]
+        # No live connection in dry-run; return empty list.
         return []

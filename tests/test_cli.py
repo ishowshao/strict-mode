@@ -106,6 +106,10 @@ class StubBroker:
             },
         ]
 
+    # Optional hook used by show-positions tests; default returns empty
+    def list_positions(self):  # pragma: no cover - set in tests when needed
+        return []
+
 
 class StubSettings:
     def __init__(self, db_url: str) -> None:
@@ -373,6 +377,28 @@ def test_tick_size_cli(runner):
     assert res_us.exit_code == 0
     assert "exchange=US/SMART" in res_us.output
     assert "rounded=256.85" in res_us.output
+
+
+def test_show_positions_cli_empty(monkeypatch, runner, tmp_path):
+    container = StubContainer(tmp_path)
+    monkeypatch.setattr(cli, "build_container", lambda: container)
+    res = runner.invoke(cli.app, ["show-positions", "--dry-run"])
+    assert res.exit_code == 0
+    assert "No positions." in res.output
+
+
+def test_show_positions_cli_rows(monkeypatch, runner, tmp_path):
+    container = StubContainer(tmp_path)
+    # Provide sample positions via stub
+    container._broker.list_positions = lambda: [  # type: ignore[attr-defined]
+        {"symbol": "AAPL", "qty": 5, "avgCost": 101.0, "currency": "USD"},
+        {"symbol": "9988.HK", "qty": 10, "avgCost": 155.5, "currency": "HKD"},
+    ]
+    monkeypatch.setattr(cli, "build_container", lambda: container)
+    res = runner.invoke(cli.app, ["show-positions", "--dry-run"])
+    assert res.exit_code == 0, res.output
+    assert "sym=AAPL qty=5.0 avg=101.0 ccy=USD" in res.output
+    assert "sym=9988.HK qty=10.0 avg=155.5 ccy=HKD" in res.output
 
 
 def test_chandelier_table_from_cache(monkeypatch, runner, tmp_path):
