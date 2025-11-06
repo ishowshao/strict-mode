@@ -743,21 +743,24 @@ def show_orders(
     if state_key not in allowed:
         raise typer.BadParameter(f"Invalid state '{state}'. Choose from: all, live, cancelled, completed")
     try:
-        if state_key in ("live", "all"):
-            list_open = getattr(broker, "list_open_orders", None)
-            if callable(list_open):
-                rows.extend(list_open())
+        # 始终拉取 open snapshot（Web API 的 open 端点可能包含最近的取消/成交）
+        list_open = getattr(broker, "list_open_orders", None)
+        if callable(list_open):
+            rows_open = list_open() or []
+            rows.extend(rows_open)
+        # 补充 completed 集合（若底层实现支持）
         if state_key in ("completed", "cancelled", "all"):
             list_completed = getattr(broker, "list_completed_orders", None)
-            completed = list_completed(api_only=api_only) if callable(list_completed) else []
-            rows.extend([dict(r) for r in completed])
+            rows_completed = list_completed(api_only=api_only) if callable(list_completed) else []
+            rows.extend([dict(r) for r in rows_completed])
     except Exception as e:  # pragma: no cover - runtime only
         typer.echo(f"Failed to fetch orders: {e}", err=True)
         raise typer.Exit(code=1)
 
     # Normalize and filter by requested state to keep behavior consistent across backends
     live_set = {"PENDINGSUBMIT", "PRESUBMITTED", "SUBMITTED", "PENDINGCANCEL", "APIPENDING"}
-    cancelled_set = {"CANCELLED", "APICANCELLED"}
+    # 兼容美国/英式拼写与 API 变体
+    cancelled_set = {"CANCELLED", "APICANCELLED", "CANCELED", "APICANCELED"}
     completed_set = {"FILLED", "INACTIVE", "EXPIRED"}
 
     if state_key == "live":
