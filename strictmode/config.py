@@ -18,9 +18,22 @@ class TelegramSettings:
 
 @dataclass
 class IBSettings:
+    """Socket API (TWS/Gateway) settings and mode selector.
+
+    mode: "socket" (default) uses ib_insync/TWS. "webapi" uses Client Portal Web API.
+    """
     host: str = "127.0.0.1"
     port: int = 7497
     client_id: int = 1
+    mode: str = "socket"  # "socket" or "webapi"
+
+
+@dataclass
+class WebAPISettings:
+    base_url: str = "https://127.0.0.1:5000/v1/api"
+    verify_tls: bool = False  # local gateway uses self-signed cert by default
+    heartbeat_sec: int = 45
+    account_hint: str | None = None  # e.g. "DU" or "U" or exact account id
 
 
 @dataclass
@@ -46,6 +59,7 @@ class AppSettings:
     tz_market2: str | None = None
     database_url: str = field(default_factory=lambda: f"sqlite:///{Path('strictmode.db').absolute()}")
     ib: IBSettings = field(default_factory=IBSettings)
+    ib_webapi: WebAPISettings = field(default_factory=WebAPISettings)
     telegram: Optional[TelegramSettings] = None
     data: DataSettings = field(default_factory=DataSettings)
     strategy: StrategySettings = field(default_factory=StrategySettings)
@@ -73,6 +87,7 @@ def load_settings() -> AppSettings:
         host=_env("IB_HOST", settings.ib.host) or settings.ib.host,
         port=int(_env("IB_PORT", str(settings.ib.port)) or settings.ib.port),
         client_id=int(_env("IB_CLIENT_ID", str(settings.ib.client_id)) or settings.ib.client_id),
+        mode=_env("IB_MODE", settings.ib.mode) or settings.ib.mode,
     )
 
     telegram_token = _env("TELEGRAM_BOT_TOKEN")
@@ -94,6 +109,14 @@ def load_settings() -> AppSettings:
         rth_only=_env_bool("RTH_ONLY", settings.strategy.rth_only),
         drawdown_pct=float(drawdown) if drawdown is not None else settings.strategy.drawdown_pct,
         initial_stop_pct=float(_env("INITIAL_STOP_PCT", str(settings.strategy.initial_stop_pct)) or settings.strategy.initial_stop_pct),
+    )
+
+    # Web API specific settings
+    settings.ib_webapi = WebAPISettings(
+        base_url=_env("IB_WEBAPI_BASE_URL", settings.ib_webapi.base_url) or settings.ib_webapi.base_url,
+        verify_tls=_env_bool("IB_WEBAPI_VERIFY_TLS", settings.ib_webapi.verify_tls),
+        heartbeat_sec=int(_env("IB_WEBAPI_HEARTBEAT_SEC", str(settings.ib_webapi.heartbeat_sec)) or settings.ib_webapi.heartbeat_sec),
+        account_hint=_env("IB_WEBAPI_ACCOUNT_HINT", settings.ib_webapi.account_hint) or settings.ib_webapi.account_hint,
     )
     return settings
 

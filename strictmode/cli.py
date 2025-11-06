@@ -12,6 +12,7 @@ import typer
 from .config import AppSettings, settings
 from .datasrc.base import AbstractDataSource, AdjustedDailyBar
 from .engine.broker_ib import DryRunBroker, IBBroker, OrderRequest
+from .engine.broker_ib_webapi import IBKRWebAPIBroker, WebAPISessionManager
 from .engine.journal import Journal, Order, Position, Stop
 from .engine.notifier import TelegramNotifier
 from .rules.chandelier import ChandelierConfig, NotEnoughDataError, trailing_stop
@@ -26,6 +27,9 @@ app = typer.Typer(
         "币种默认值: 美股默认 USD；.HK 结尾的港股默认 HKD（可用 --currency 显式覆盖）。"
     )
 )
+
+ib_app = typer.Typer(help="IBKR operational commands (Web API Gateway)")
+app.add_typer(ib_app, name="ibkr")
 
 
 class DependencyContainer:
@@ -53,9 +57,19 @@ class DependencyContainer:
             return AlphaVantageDataSource(api_key=self.settings.data.api_key)
         raise ValueError(f"Unknown data source: {source}")
 
-    def broker(self, paper: bool, dry_run: bool) -> DryRunBroker | IBBroker:
+    def broker(self, paper: bool, dry_run: bool):
         if dry_run:
             return DryRunBroker()
+        mode = (self.settings.ib.mode or "socket").lower()
+        if mode == "webapi":
+            sess = WebAPISessionManager(
+                base_url=self.settings.ib_webapi.base_url,
+                verify_tls=self.settings.ib_webapi.verify_tls,
+                heartbeat_sec=self.settings.ib_webapi.heartbeat_sec,
+                account_hint=self.settings.ib_webapi.account_hint,
+            )
+            return IBKRWebAPIBroker(session=sess, paper=paper)
+        # default: socket/ib_insync
         return IBBroker(
             host=self.settings.ib.host,
             port=self.settings.ib.port,
@@ -123,6 +137,73 @@ def _ib_symbol_matches(contract_symbol: str | None, user_symbol: str) -> bool:
         ib_sym = core.lstrip("0") or "0"
         return contract_symbol == ib_sym
     return contract_symbol == user_symbol
+
+
+@ib_app.command("session-status")
+def ibkr_session_status() -> None:
+    """Show Web API session status and selected account (if any)."""
+    container = build_container()
+    sess = WebAPISessionManager(
+        base_url=container.settings.ib_webapi.base_url,
+        verify_tls=container.settings.ib_webapi.verify_tls,
+        heartbeat_sec=container.settings.ib_webapi.heartbeat_sec,
+        account_hint=container.settings.ib_webapi.account_hint,
+    )
+    valid = sess.validate()
+    typer.echo(f"SSO valid: {valid}")
+    if valid:
+        try:
+            acct = sess.account_id()
+            typer.echo(f"Account selected: {acct}")
+        except Exception as e:
+            typer.echo(f"Account selection error: {e}")
+
+
+@ib_app.command("session-ensure")
+def ibkr_session_ensure(
+    compete: bool = typer.Option(True, help="Reclaim brokerage session if occupied"),
+) -> None:
+    """Ensure brokerage session is active (optionally reclaim)."""
+    container = build_container()
+    sess = WebAPISessionManager(
+        base_url=container.settings.ib_webapi.base_url,
+        verify_tls=container.settings.ib_webapi.verify_tls,
+        heartbeat_sec=container.settings.ib_webapi.heartbeat_sec,
+        account_hint=container.settings.ib_webapi.account_hint,
+    )
+    ok = sess.ensure_brokerage(compete=compete)
+    typer.echo(f"Brokerage session ready: {ok}")
+    if ok:
+        try:
+            typer.echo(f"Account: {sess.account_id()}")
+        except Exception:
+            pass
+
+
+@ib_app.command("accounts")
+def ibkr_accounts() -> None:
+    """List accounts returned by Web API and current selection."""
+    container = build_container()
+    sess = WebAPISessionManager(
+        base_url=container.settings.ib_webapi.base_url,
+        verify_tls=container.settings.ib_webapi.verify_tls,
+        heartbeat_sec=container.settings.ib_webapi.heartbeat_sec,
+        account_hint=container.settings.ib_webapi.account_hint,
+    )
+    if not sess.validate():
+        typer.echo("SSO invalid. Please login via Gateway.")
+        raise typer.Exit(code=1)
+    try:
+        r = sess._get("/iserver/accounts")
+        r.raise_for_status()
+        data = r.json()
+        typer.echo(str(data))
+        try:
+            typer.echo(f"Selected: {sess.account_id()}")
+        except Exception:
+            pass
+    except Exception as e:
+        typer.echo(f"Error: {e}")
 
 
 @app.command()
