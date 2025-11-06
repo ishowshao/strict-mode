@@ -35,43 +35,100 @@ class WebAPISessionManager:
         heartbeat_sec: int = 45,
         account_hint: str | None = None,
         timeout: float = 10.0,
+        trust_env: bool = False,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        # Ensure base_url ends with '/' so relative paths append after /v1/api/
+        self.base_url = base_url if base_url.endswith('/') else base_url + '/'
         self.verify = verify_tls
         self.heartbeat_sec = heartbeat_sec
         self.account_hint = account_hint
-        self._client = httpx.Client(base_url=self.base_url, verify=self.verify, timeout=timeout)
+        # Avoid inheriting proxy env which may cause localhost calls to time out
+        self._client = httpx.Client(
+            base_url=self.base_url,
+            verify=self.verify,
+            timeout=httpx.Timeout(timeout),
+            trust_env=trust_env,
+        )
         self._last_tick = 0.0
         self._account_id: str | None = None
 
     # --- HTTP helpers -----------------------------------------------------
     def _get(self, path: str, **kw) -> httpx.Response:
-        return self._client.get(path, **kw)
+        # With httpx base_url set to .../v1/api, absolute paths would drop the base path
+        # Normalize to relative paths so final URL is base_url + path
+        return self._client.get(path.lstrip("/"), **kw)
 
     def _post(self, path: str, json: Any | None = None, **kw) -> httpx.Response:
-        return self._client.post(path, json=json, **kw)
+        return self._client.post(path.lstrip("/"), json=json, **kw)
 
     def _delete(self, path: str, **kw) -> httpx.Response:
-        return self._client.delete(path, **kw)
+        return self._client.delete(path.lstrip("/"), **kw)
 
     # --- Session primitives ----------------------------------------------
     def validate(self) -> bool:
-        """Validate read-only SSO session and cache accounts if possible."""
+        """Validate read-only SSO session and cache accounts if possible.
+
+        Different Gateway builds return different shapes, e.g.:
+        - 1 / "1" / true
+        - {"VALID": true}
+        - {"RESULT": true, "EXPIRES": 12345, ...}
+        Treat any truthy VALID/RESULT/isauthenticated or positive EXPIRES as valid.
+        """
         try:
+            # Prime cookie/session
+            try:
+                self._post("/iserver/auth/status")
+            except Exception:
+                pass
+            try:
+                self._get("/tickle")
+            except Exception:
+                pass
             r = self._get("/sso/validate")
-            if r.status_code != 200:
-                return False
-            data = r.json()
-            valid = False
-            # Some deployments return {"VALID": true} or numeric 1
-            if isinstance(data, dict):
-                valid = bool(data.get("VALID") or data.get("valid") or data.get("isAuthenticated"))
-            elif isinstance(data, (int, float, str)):
-                valid = str(data).strip() in {"1", "true", "True"}
-            if not valid:
-                return False
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except Exception:
+                    data = None
+                valid = False
+                if isinstance(data, dict):
+                    low = {str(k).lower(): v for k, v in data.items()}
+                    valid = bool(
+                        low.get("valid")
+                        or low.get("result")
+                        or low.get("isauthenticated")
+                        or low.get("is_authenticated")
+                        or low.get("authenticated")
+                    )
+                    if not valid:
+                        # Fallback heuristic: EXPIRES positive suggests active session
+                        try:
+                            exp = float(low.get("expires") or low.get("expiry") or 0)
+                            if exp > 0:
+                                valid = True
+                        except Exception:
+                            pass
+                elif isinstance(data, (int, float, str, bool)):
+                    s = str(data).strip().lower()
+                    valid = s in {"1", "true", "ok"}
+                if valid:
+                    return True
         except Exception:
-            return False
+            pass
+        # Fallback: use auth/status shape as read-only session indicator
+        try:
+            rs = self._post("/iserver/auth/status")
+            if rs.status_code == 200:
+                body = rs.json() or {}
+                if isinstance(body, dict):
+                    low = {str(k).lower(): v for k, v in body.items()}
+                    a = low.get("authenticated")
+                    status = str(low.get("status") or "").upper()
+                    if a is True or status == "COMPLETE":
+                        return True
+        except Exception:
+            pass
+        return False
         # Probe auth status for diagnostics but do not fail on errors
         try:
             self._post("/iserver/auth/status")
@@ -80,19 +137,69 @@ class WebAPISessionManager:
         return True
 
     def ensure_brokerage(self, compete: bool = True) -> bool:
-        """Ensure brokerage (trade) session is ready; optionally reclaim (compete)."""
+        """Ensure brokerage (trade) session is ready; optionally reclaim (compete).
+
+        After init, poll /iserver/auth/status until authenticated/connected or COMPLETE.
+        """
         try:
             payload = {"publish": True, "compete": bool(compete)}
+            # Prime cookie/session
+            try:
+                self._post("/iserver/auth/status")
+                self._get("/tickle")
+            except Exception:
+                pass
             r = self._post("/iserver/auth/ssodh/init", json=payload)
             if r.status_code not in (200, 202):
+                # Try legacy reauth then retry ssodh once
+                try:
+                    self._post("/iserver/reauthenticate")
+                    time.sleep(0.5)
+                    r = self._post("/iserver/auth/ssodh/init", json=payload)
+                except Exception:
+                    pass
+            if r.status_code not in (200, 202):
                 return False
+            # If response body indicates failure, attempt legacy reauth once more
+            try:
+                body = r.json() or {}
+                if isinstance(body, dict) and "failed" in str(body).lower():
+                    self._post("/iserver/reauthenticate")
+                    time.sleep(0.5)
+            except Exception:
+                pass
         except Exception:
+            return False
+        # Poll auth/status for readiness
+        ready = False
+        for _ in range(20):  # ~6s max
+            try:
+                rs = self._post("/iserver/auth/status")
+                if rs.status_code == 200:
+                    body = rs.json() or {}
+                    if isinstance(body, dict):
+                        low = {str(k).lower(): v for k, v in body.items()}
+                        if low.get("authenticated") is True or low.get("connected") is True or str(low.get("status") or "").upper() == "COMPLETE":
+                            ready = True
+                            break
+                # Secondary signal: marketdata connected endpoint
+                rc = self._get("/iserver/marketdata/connected")
+                if rc.status_code == 200:
+                    try:
+                        if bool(rc.json()):
+                            ready = True
+                            break
+                    except Exception:
+                        pass
+                time.sleep(0.3)
+            except Exception:
+                time.sleep(0.3)
+        if not ready:
             return False
         # Probe accounts and cache selection
         try:
             self._select_account()
         except Exception:
-            # Not fatal; caller may pass explicit account later
             pass
         return True
 
@@ -111,7 +218,36 @@ class WebAPISessionManager:
 
     # --- Account selection ------------------------------------------------
     def _select_account(self) -> str:
+        # Prime local session cookie and gateway session state
+        try:
+            self._get("/tickle")
+        except Exception:
+            pass
         r = self._get("/iserver/accounts")
+        if r.status_code == 400 or r.status_code == 401:
+            # Likely missing brokerage session; try to init and retry a few times
+            self.ensure_brokerage(compete=True)
+            for _ in range(5):
+                time.sleep(0.2)
+                try:
+                    r = self._get("/iserver/accounts")
+                    if r.status_code == 200:
+                        break
+                except Exception:
+                    pass
+            # Fallback path observed in docs: validate SSO then reauthenticate
+            if r.status_code != 200:
+                try:
+                    self._get("/sso/validate")
+                except Exception:
+                    pass
+                try:
+                    rr = self._post("/iserver/reauthenticate", json={})
+                    if rr.status_code in (200, 202):
+                        time.sleep(0.5)
+                        r = self._get("/iserver/accounts")
+                except Exception:
+                    pass
         r.raise_for_status()
         data = r.json() or {}
         accounts = []
@@ -264,20 +400,24 @@ class IBKRWebAPIBroker:
         ot = request.order_type.upper()
         if ot == "STP":
             ot = "STOP"
+        # Align TIF: IBKR Web API rejects MKT+GTC, use DAY for market orders
+        tif = request.tif
+        if ot == "MKT" and str(tif).upper() == "GTC":
+            tif = "DAY"
         payload: dict[str, Any] = {
             "conid": c.conid,
             "side": side,
             "orderType": ot,
-            "tif": request.tif,
+            "tif": tif,
             "quantity": abs(request.qty),
-            "outsideRTH": bool(request.outside_rth),
+            "outsideRth": bool(request.outside_rth),
         }
         if request.order_ref:
             payload["cOID"] = request.order_ref
         if price is not None:
             payload["price"] = price
 
-        r = self.session._post(f"/iserver/account/{acct}/orders", json=payload)
+        r = self.session._post(f"/iserver/account/{acct}/orders", json={"orders": [payload]})
         r.raise_for_status()
         resp = r.json() or {}
         # Response could be object or list; attempt to extract id + status
@@ -327,14 +467,14 @@ class IBKRWebAPIBroker:
             "orderType": "STOP",
             "tif": stop.tif,
             "quantity": abs(stop.qty),
-            "outsideRTH": bool(stop.outside_rth),
+            "outsideRth": bool(stop.outside_rth),
             "price": price,
         }
         if stop.order_ref:
             payload["cOID"] = stop.order_ref
         if stop.parent_id is not None:
             payload["parentId"] = int(stop.parent_id)
-        r = self.session._post(f"/iserver/account/{acct}/orders", json=payload)
+        r = self.session._post(f"/iserver/account/{acct}/orders", json={"orders": [payload]})
         r.raise_for_status()
         resp = r.json() or {}
         oid: Optional[int] = None
@@ -376,25 +516,42 @@ class IBKRWebAPIBroker:
             return []
         data = r.json() or []
         out: list[dict] = []
-        if not isinstance(data, list):
+        # CP API may return {"orders": [...], "snapshot": true}
+        if isinstance(data, dict) and "orders" in data:
+            items = data.get("orders") or []
+        else:
+            items = data
+        if not isinstance(items, list):
             return out
-        for o in data:
+        for o in items:
             if not isinstance(o, dict):
                 continue
             try:
+                # Normalize fields observed in CP API responses
+                tif = o.get("tif") or o.get("timeInForce")
+                order_ref = o.get("cOID") or o.get("order_ref")
+                qty = o.get("quantity") or o.get("totalSize") or o.get("totalQuantity")
+                aux = o.get("auxPrice") or o.get("stop_price")
+                lmt = o.get("lmtPrice") or (o.get("price") if str(o.get("orderType")).upper() in {"LMT", "LIMIT"} else None)
+                # Cast string numbers to float when needed
+                def _to_float(v):
+                    try:
+                        return float(v)
+                    except Exception:
+                        return None
                 out.append(
                     {
                         "orderId": int(o.get("orderId") or o.get("id") or 0),
                         "symbol": o.get("ticker") or o.get("symbol"),
                         "status": o.get("status"),
-                        "type": o.get("orderType"),
+                        "type": o.get("orderType") or o.get("origOrderType"),
                         "action": o.get("side"),
-                        "tif": o.get("tif"),
+                        "tif": tif,
                         "parentId": o.get("parentId"),
-                        "orderRef": o.get("cOID"),
-                        "totalQuantity": o.get("quantity"),
-                        "lmtPrice": o.get("lmtPrice") or o.get("price") if o.get("orderType") == "LMT" else None,
-                        "auxPrice": o.get("auxPrice") or o.get("price") if o.get("orderType") in ("STP", "STOP") else None,
+                        "orderRef": order_ref,
+                        "totalQuantity": _to_float(qty),
+                        "lmtPrice": _to_float(lmt),
+                        "auxPrice": _to_float(aux),
                     }
                 )
             except Exception:
@@ -410,7 +567,8 @@ class IBKRWebAPIBroker:
 
     def list_positions(self) -> list[dict]:
         acct = self.session.account_id()
-        r = self.session._get(f"/iserver/portfolio/{acct}/positions")
+        # CP API positions are under /portfolio, not /iserver
+        r = self.session._get(f"/portfolio/{acct}/positions")
         if r.status_code != 200:
             return []
         data = r.json() or []
@@ -421,8 +579,8 @@ class IBKRWebAPIBroker:
             if not isinstance(p, dict):
                 continue
             try:
-                sym = p.get("ticker") or p.get("symbol")
-                exch = str(p.get("exchange") or "").upper()
+                sym = p.get("ticker") or p.get("symbol") or p.get("contractDesc")
+                exch = str(p.get("exchange") or p.get("listingExchange") or "").upper()
                 if exch == "SEHK" and isinstance(sym, str) and sym.isdigit():
                     sym = sym.zfill(4) + ".HK"
                 out.append(
@@ -460,4 +618,3 @@ class IBKRWebAPIBroker:
             except Exception:
                 continue
         return out
-

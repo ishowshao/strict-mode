@@ -140,7 +140,9 @@ def _ib_symbol_matches(contract_symbol: str | None, user_symbol: str) -> bool:
 
 
 @ib_app.command("session-status")
-def ibkr_session_status() -> None:
+def ibkr_session_status(
+    debug: bool = typer.Option(False, help="Print base URL and raw /sso/validate payload"),
+) -> None:
     """Show Web API session status and selected account (if any)."""
     container = build_container()
     sess = WebAPISessionManager(
@@ -149,6 +151,28 @@ def ibkr_session_status() -> None:
         heartbeat_sec=container.settings.ib_webapi.heartbeat_sec,
         account_hint=container.settings.ib_webapi.account_hint,
     )
+    if debug:
+        typer.echo(f"Base URL: {container.settings.ib_webapi.base_url}")
+        try:
+            r2 = sess._post("/iserver/auth/status")
+            typer.echo(f"Raw /iserver/auth/status: {r2.status_code} {r2.json()}")
+        except Exception as e:
+            typer.echo(f"/iserver/auth/status error: {e}")
+        try:
+            r = sess._get("/sso/validate")
+            typer.echo(f"Raw /sso/validate: {r.status_code} {r.json()}")
+        except Exception as e:
+            typer.echo(f"/sso/validate error: {e}")
+        try:
+            r3 = sess._get("/iserver/accounts")
+            typer.echo(f"Probe /iserver/accounts: {r3.status_code}")
+            if r3.status_code >= 400:
+                try:
+                    typer.echo(f"accounts body: {r3.json()}")
+                except Exception:
+                    pass
+        except Exception as e:
+            typer.echo(f"/iserver/accounts error: {e}")
     valid = sess.validate()
     typer.echo(f"SSO valid: {valid}")
     if valid:
@@ -157,6 +181,14 @@ def ibkr_session_status() -> None:
             typer.echo(f"Account selected: {acct}")
         except Exception as e:
             typer.echo(f"Account selection error: {e}")
+            # 尝试一次 compete 夺回 + 退避重试
+            ok = sess.ensure_brokerage(compete=True)
+            typer.echo(f"ensure_brokerage(compete) -> {ok}")
+            try:
+                acct = sess.account_id()
+                typer.echo(f"Account selected after ensure: {acct}")
+            except Exception as e2:
+                typer.echo(f"Still failed to select account: {e2}")
 
 
 @ib_app.command("session-ensure")
@@ -836,14 +868,17 @@ def reconcile_stops(
         raise typer.Exit(code=1)
 
     # Filter STOPs belonging to StrictMode for this symbol
-    stops = [
-        r
-        for r in rows
-        if _ib_symbol_matches(r.get("symbol"), symbol)
-        and str(r.get("type", "")).upper().startswith("STP")
-        and isinstance(r.get("orderRef"), str)
-        and r.get("orderRef", "").startswith("SM:")
-    ]
+    stops = []
+    for r in rows:
+        if not _ib_symbol_matches(r.get("symbol"), symbol):
+            continue
+        typ = str(r.get("type", "")).upper()
+        if not (typ.startswith("STP") or typ in {"STOP", "STOP_LIMIT", "STOPLIMIT"}):
+            continue
+        ref = r.get("orderRef")
+        if not (isinstance(ref, str) and ref.startswith("SM:")):
+            continue
+        stops.append(r)
     total_stop_qty = float(sum(float(r.get("totalQuantity") or 0.0) for r in stops))
     typer.echo(
         f"Position qty={pos_qty}, STOPs count={len(stops)}, total STOP qty={total_stop_qty}"
