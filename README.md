@@ -339,6 +339,19 @@ strictmode-service
 - 每日更新时会记录每个标的的更新情况
 - 错误和警告会记录到数据库的 `audit_log` 表
 
+要在 stdout 同步看到这些日志，请开启环境变量：
+
+```bash
+# 在终端前台运行服务时输出详细日志
+export STRICTMODE_STDOUT_LOG=true
+strictmode-service
+```
+
+说明：
+- 该开关会让所有 `audit_log` 记录在写入数据库的同时打印到标准输出；
+- 你也可以使用 `STRICTMODE_VERBOSE=true` 达到相同效果；
+- 每次任务开始时会有一条 `Daily update started: ...` 标记，任务结束时会有 `Daily update completed: ...` 汇总；
+
 ## 🛡️ 安全特性
 
 ### 纸面交易优先

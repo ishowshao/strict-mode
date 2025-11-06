@@ -40,6 +40,11 @@ def daily_update_task(container: DependencyContainer, symbol_filter: Optional[Ca
     journal = container.journal
     settings = container.settings
     target_date = _get_market_date(settings)
+    # Start-of-task marker for operators (also goes to stdout when enabled)
+    journal.log(
+        "INFO",
+        f"Daily update started: date={target_date}, tz={settings.tz_market}",
+    )
 
     # 获取所有持仓
     positions = journal.get_all_positions()

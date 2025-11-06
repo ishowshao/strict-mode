@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -210,11 +211,28 @@ class Journal:
         self.conn.commit()
 
     def log(self, level: str, message: str, ctx: str | None = None) -> None:
+        ts = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "INSERT INTO audit_log(ts, level, msg, ctx) VALUES (?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), level, message, ctx),
+            (ts, level, message, ctx),
         )
         self.conn.commit()
+        # Optional stdout log for operators watching the service.
+        # Enable with STRICTMODE_STDOUT_LOG=true (or STRICTMODE_VERBOSE=true).
+        try:
+            verbose = (os.getenv("STRICTMODE_STDOUT_LOG") or os.getenv("STRICTMODE_VERBOSE") or "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+            }
+            if verbose:
+                # Print a compact single-line record mirroring the DB entry.
+                suffix = f" ctx={ctx}" if ctx else ""
+                print(f"[{ts}] {level}: {message}{suffix}")
+        except Exception:
+            # Never let printing interfere with core logging.
+            pass
 
     def get_all_positions(self) -> list[Position]:
         rows = self.conn.execute("SELECT * FROM positions").fetchall()
