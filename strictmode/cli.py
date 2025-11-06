@@ -725,7 +725,7 @@ def show_orders(
         help="Match TWS filters: all|live|cancelled|completed (default: live)",
     ),
     api_only: bool = typer.Option(True, help="Completed orders: API-only scope (IB API setting)"),
-    group: str = typer.Option("orderRef", help="Group output by 'orderRef' or 'symbol'"),
+    group: Optional[str] = typer.Option(None, "--group", help="Optional grouping: orderRef | symbol"),
 ) -> None:
     """Show IBKR orders using TWS-style filters.
 
@@ -750,56 +750,63 @@ def show_orders(
         if state_key in ("completed", "cancelled", "all"):
             list_completed = getattr(broker, "list_completed_orders", None)
             completed = list_completed(api_only=api_only) if callable(list_completed) else []
-            upper = [dict(r) for r in completed]
-            # Split completed into cancelled vs completed per TWS semantics
-            cancelled_set = {"CANCELLED", "APICANCELLED"}
-            completed_set = {"FILLED", "INACTIVE", "EXPIRED"}
-            if state_key == "cancelled":
-                rows.extend([r for r in upper if str(r.get("status", "")).upper() in cancelled_set])
-            elif state_key == "completed":
-                rows.extend([r for r in upper if str(r.get("status", "")).upper() in completed_set])
-            else:  # all -> include both
-                rows.extend(upper)
+            rows.extend([dict(r) for r in completed])
     except Exception as e:  # pragma: no cover - runtime only
         typer.echo(f"Failed to fetch orders: {e}", err=True)
         raise typer.Exit(code=1)
+
+    # Normalize and filter by requested state to keep behavior consistent across backends
+    live_set = {"PENDINGSUBMIT", "PRESUBMITTED", "SUBMITTED", "PENDINGCANCEL", "APIPENDING"}
+    cancelled_set = {"CANCELLED", "APICANCELLED"}
+    completed_set = {"FILLED", "INACTIVE", "EXPIRED"}
+
+    if state_key == "live":
+        rows = [r for r in rows if str(r.get("status", "")).upper() in live_set]
+    elif state_key == "cancelled":
+        rows = [r for r in rows if str(r.get("status", "")).upper() in cancelled_set]
+    elif state_key == "completed":
+        rows = [r for r in rows if str(r.get("status", "")).upper() in completed_set]
+    else:  # all -> include all
+        pass
 
     if not rows:
         typer.echo("No orders matching filters.")
         return
 
-    gkey = (group or "orderRef").lower()
-    if gkey not in {"orderref", "symbol"}:
-        gkey = "orderref"
-
-    # Build groups
-    groups: dict[str, list[dict]] = {}
-    for r in rows:
-        key = str(r.get("orderRef") or "NO-REF") if gkey == "orderref" else str(r.get("symbol") or "?")
-        groups.setdefault(key, []).append(r)
-
-    for key in sorted(groups.keys()):
-        header = f"orderRef={key}" if gkey == "orderref" else f"symbol={key}"
-        typer.echo(f"\n[{header}]")
-        # Within group, sort parents first, then children, then others by id
-        def _order(r: dict) -> tuple[int, int]:
-            pid = r.get("parentId")
-            try:
-                pid_i = int(pid) if pid is not None else 0
-            except Exception:
-                pid_i = 0
-            try:
-                oid = int(r.get("orderId") or 0)
-            except Exception:
-                oid = 0
-            # parents (pid=0) first, then by oid
-            return (0 if not pid_i else 1, oid)
-
-        for r in sorted(groups[key], key=_order):
+    if group is None:
+        # Backward-compatible flat list
+        for r in rows:
             typer.echo(
                 f"id={r.get('orderId')} parent={r.get('parentId')} sym={r.get('symbol')} {r.get('action')} "
                 f"{r.get('type')} tif={r.get('tif')} lmt={r.get('lmtPrice')} stp={r.get('auxPrice')} status={r.get('status')}"
             )
+    else:
+        gkey = group.lower()
+        if gkey not in {"orderref", "symbol"}:
+            gkey = "orderref"
+        groups: dict[str, list[dict]] = {}
+        for r in rows:
+            key = str(r.get("orderRef") or "NO-REF") if gkey == "orderref" else str(r.get("symbol") or "?")
+            groups.setdefault(key, []).append(r)
+        for key in sorted(groups.keys()):
+            header = f"orderRef={key}" if gkey == "orderref" else f"symbol={key}"
+            typer.echo(f"\n[{header}]")
+            def _order(r: dict) -> tuple[int, int]:
+                pid = r.get("parentId")
+                try:
+                    pid_i = int(pid) if pid is not None else 0
+                except Exception:
+                    pid_i = 0
+                try:
+                    oid = int(r.get("orderId") or 0)
+                except Exception:
+                    oid = 0
+                return (0 if not pid_i else 1, oid)
+            for r in sorted(groups[key], key=_order):
+                typer.echo(
+                    f"id={r.get('orderId')} parent={r.get('parentId')} sym={r.get('symbol')} {r.get('action')} "
+                    f"{r.get('type')} tif={r.get('tif')} lmt={r.get('lmtPrice')} stp={r.get('auxPrice')} status={r.get('status')}"
+                )
 
 
 @app.command("show-positions")
