@@ -725,6 +725,7 @@ def show_orders(
         help="Match TWS filters: all|live|cancelled|completed (default: live)",
     ),
     api_only: bool = typer.Option(True, help="Completed orders: API-only scope (IB API setting)"),
+    group: str = typer.Option("orderRef", help="Group output by 'orderRef' or 'symbol'"),
 ) -> None:
     """Show IBKR orders using TWS-style filters.
 
@@ -767,11 +768,38 @@ def show_orders(
         typer.echo("No orders matching filters.")
         return
 
+    gkey = (group or "orderRef").lower()
+    if gkey not in {"orderref", "symbol"}:
+        gkey = "orderref"
+
+    # Build groups
+    groups: dict[str, list[dict]] = {}
     for r in rows:
-        typer.echo(
-            f"id={r.get('orderId')} parent={r.get('parentId')} sym={r.get('symbol')} {r.get('action')} "
-            f"{r.get('type')} tif={r.get('tif')} lmt={r.get('lmtPrice')} stp={r.get('auxPrice')} status={r.get('status')}"
-        )
+        key = str(r.get("orderRef") or "NO-REF") if gkey == "orderref" else str(r.get("symbol") or "?")
+        groups.setdefault(key, []).append(r)
+
+    for key in sorted(groups.keys()):
+        header = f"orderRef={key}" if gkey == "orderref" else f"symbol={key}"
+        typer.echo(f"\n[{header}]")
+        # Within group, sort parents first, then children, then others by id
+        def _order(r: dict) -> tuple[int, int]:
+            pid = r.get("parentId")
+            try:
+                pid_i = int(pid) if pid is not None else 0
+            except Exception:
+                pid_i = 0
+            try:
+                oid = int(r.get("orderId") or 0)
+            except Exception:
+                oid = 0
+            # parents (pid=0) first, then by oid
+            return (0 if not pid_i else 1, oid)
+
+        for r in sorted(groups[key], key=_order):
+            typer.echo(
+                f"id={r.get('orderId')} parent={r.get('parentId')} sym={r.get('symbol')} {r.get('action')} "
+                f"{r.get('type')} tif={r.get('tif')} lmt={r.get('lmtPrice')} stp={r.get('auxPrice')} status={r.get('status')}"
+            )
 
 
 @app.command("show-positions")
@@ -920,6 +948,153 @@ def reconcile_stops(
         except Exception as e:  # pragma: no cover - runtime only
             typer.echo(f"Failed to cancel {oid}: {e}", err=True)
     typer.echo(f"Reconcile complete. Cancelled={cancelled}")
+
+
+@app.command("add-stop")
+def add_stop(
+    symbol: Optional[str] = typer.Argument(None, help="Ticker symbol; omit to use --all"),
+    all_positions: bool = typer.Option(False, "--all", help="Process all positions without a stop"),
+    paper: bool = typer.Option(True, help="Use paper trading account"),
+    dry_run: bool = typer.Option(False, help="Dry run only; no IBKR order sent"),
+    method: str = typer.Option("chandelier", help="Stop method: chandelier (default)"),
+    atr_n: Optional[int] = typer.Option(None, help="ATR window override"),
+    atr_k: Optional[float] = typer.Option(None, help="ATR multiplier override"),
+    initial_stop_pct: Optional[float] = typer.Option(None, help="Initial stop percent (e.g., 0.05)"),
+    tif: str = typer.Option("GTC", help="Time in force for STOP"),
+    rth: bool = typer.Option(True, help="Regular trading hours only"),
+    if_exists: str = typer.Option(
+        "skip",
+        help="On existing StrictMode STOP: skip | modify-if-lower | replace",
+    ),
+) -> None:
+    """Add or adjust a stop-loss for an existing position.
+
+    - When --all is set, iterates all positions; otherwise processes the given symbol.
+    - Uses Chandelier trailing stop starting from position avg price and initial_stop_pct.
+    - Existing STOPs with orderRef starting with 'SM:' are considered StrictMode-managed.
+    """
+    container = build_container()
+    journal = container.journal
+    broker = container.broker(paper=paper, dry_run=dry_run)
+
+    if method.lower() != "chandelier":
+        raise typer.BadParameter("Only 'chandelier' is currently supported")
+    if initial_stop_pct is None:
+        initial_stop_pct = container.settings.strategy.initial_stop_pct
+    cfg = ChandelierConfig(
+        atr_period=atr_n or container.settings.strategy.atr_n,
+        atr_multiplier=atr_k or container.settings.strategy.atr_k,
+        drawdown_pct=container.settings.strategy.drawdown_pct,
+    )
+
+    def _compute_stop(sym: str, avg_price: float) -> float:
+        ds = container.data_source()
+        bars = ds.get_adjusted_daily(sym)
+        df = _to_dataframe(bars)
+        init_stop = _initial_stop_price(avg_price, initial_stop_pct or 0.05)
+        df_for_calc = _latest_bars(df, cfg.atr_period * 2)
+        try:
+            stops = trailing_stop(df_for_calc, cfg, previous_stop=init_stop)
+        except NotEnoughDataError as exc:
+            raise typer.BadParameter(str(exc))
+        return float(stops.dropna().iloc[-1])
+
+    def _process(sym: str) -> None:
+        pos = journal.get_position(sym)
+        if not pos or pos.qty <= 0:
+            typer.echo(f"Skip {sym}: no long position")
+            return
+        try:
+            stop_px = _compute_stop(sym, pos.avg_price)
+        except Exception as e:
+            typer.echo(f"Skip {sym}: compute stop failed: {e}")
+            return
+        order_ref = f"SM:{sym}"
+        # Existing StrictMode STOPs
+        try:
+            existing = broker.find_stop_orders(sym, order_ref_prefix="SM:")  # type: ignore[attr-defined]
+        except Exception:
+            existing = []
+        if not existing:
+            typer.echo(f"Plan: place STOP for {sym} qty={pos.qty} @ {stop_px:.2f}")
+            if dry_run:
+                return
+            req = OrderRequest(
+                symbol=sym,
+                qty=pos.qty,
+                side="SELL",
+                order_type="STP",
+                stop_price=stop_px,
+                tif=tif,
+                outside_rth=not rth,
+                currency=("HKD" if sym.upper().endswith(".HK") else "USD"),
+                order_ref=order_ref,
+            )
+            resp = broker.place_order(req)
+            typer.echo(f"Placed STOP for {sym}: {resp.status}")
+        else:
+            if_exists_lc = if_exists.lower().strip()
+            if if_exists_lc == "skip":
+                typer.echo(f"Skip {sym}: found existing STOP(s) -> {existing}")
+                return
+            elif if_exists_lc == "modify-if-lower":
+                # Only raise stop if new > old
+                updated = 0
+                for oid, old_px in existing:
+                    if stop_px > float(old_px) + 1e-9:
+                        typer.echo(f"Plan: modify STOP {oid} for {sym}: {old_px} -> {stop_px:.2f}")
+                        if not dry_run:
+                            broker.modify_order(oid, stop_price=stop_px)  # type: ignore[attr-defined]
+                            updated += 1
+                typer.echo(f"Modified {updated} STOP(s) for {sym}")
+            elif if_exists_lc == "replace":
+                for oid, _ in existing:
+                    typer.echo(f"Plan: cancel STOP {oid} for {sym}")
+                    if not dry_run:
+                        broker.cancel_order(oid)
+                typer.echo(f"Plan: place STOP for {sym} qty={pos.qty} @ {stop_px:.2f}")
+                if not dry_run:
+                    req = OrderRequest(
+                        symbol=sym,
+                        qty=pos.qty,
+                        side="SELL",
+                        order_type="STP",
+                        stop_price=stop_px,
+                        tif=tif,
+                        outside_rth=not rth,
+                        currency=("HKD" if sym.upper().endswith(".HK") else "USD"),
+                        order_ref=order_ref,
+                    )
+                    resp = broker.place_order(req)
+                    typer.echo(f"Placed STOP for {sym}: {resp.status}")
+            else:
+                raise typer.BadParameter("--if-exists expects: skip | modify-if-lower | replace")
+
+        # Journal update
+        now = datetime.now(timezone.utc)
+        journal.upsert_stop(
+            Stop(
+                symbol=sym,
+                stop_price=stop_px,
+                method="chandelier",
+                atr_n=cfg.atr_period,
+                atr_k=cfg.atr_multiplier,
+                updated_at=now,
+            )
+        )
+        journal.log("INFO", f"add-stop for {sym}", ctx=json.dumps({"stop": stop_px}))
+
+    if all_positions:
+        positions = journal.get_all_positions()
+        if not positions:
+            typer.echo("No positions to process.")
+            raise typer.Exit(code=0)
+        for p in positions:
+            _process(p.symbol)
+    else:
+        if not symbol:
+            raise typer.BadParameter("Must provide SYMBOL or use --all")
+        _process(symbol)
 
 
 @app.command("cancel")
